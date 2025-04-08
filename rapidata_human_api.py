@@ -1,5 +1,5 @@
 from mcp.server.fastmcp import FastMCP
-from rapidata import RapidataClient
+from rapidata import RapidataClient, LanguageFilter
 import os
 from typing import Any, Optional
 import logging
@@ -87,7 +87,7 @@ async def classification(
     answer_options: list[str],
     dir_path: Optional[str] = None,
     total_responses: int = 25,
-):
+) -> list[dict[str, float]]:
     """get classification responses from humans
 
     Will ask actual humans to classify the images in the directory.
@@ -133,7 +133,7 @@ async def classification(
             logger.error(f"Error viewing ranking make sure to update your rapidata version")
 
         results = order.get_results()["results"]
-        weighted_results = [result["summedUserScoresRatios"] for result in results]
+        weighted_results = [result["aggregatedResults"] for result in results]
         logger.debug(f"Weighted results: {weighted_results}")
         logger.info("Successfully retrieved classification results")
         return weighted_results
@@ -234,7 +234,58 @@ async def rank_images(dir_path: str,
         # Restore the original stdout
         # sys.stdout = original_stdout
         return {"error": f"Unexpected error: {str(e)}"}
-    
+
+@mcp.tool()
+async def compare_texts(
+    text_pairs: list[list[str]],
+    name: str, 
+    instruction: str, 
+    total_responses: int = 15,
+    language: str = "en",
+) -> list[dict[str, int]]:
+    """compare two texts and get human preference
+
+    Will ask actual humans to compare the two texts and choose the better one.
+
+    Args:
+        text_pairs (list[list[str]]): list of pairs of texts to be compared. Each pair should be a list of exactly two strings.
+        name (str): The name of the order (will not effect the results but used to identify the order).
+        instruction (str): The question asked to the people. They will try to choose the better text based on this. (example "Which text is do you prefer?")
+        total_responses (int): The total number of responses that will be collected. More responses will take longer but give a clearer results. defaults to 15.
+        language (str): The language of the texts. Has to be given as 2 LOWERCASE letters defaults to "en".
+
+    Returns:
+        list[dict[str, int]]: list of dictionaries containing the comparison results for each pair of texts
+    """
+    try:
+        logger.info(f"compare_texts called with name: {name}, instruction: {instruction}")
+        logger.debug(f"Total responses: {total_responses}")
+        client = RapidataClient()
+        client.order._set_priority(200)
+
+        order = client.order.create_compare_order(
+            name=name,
+            instruction=instruction,
+            datapoints=text_pairs,
+            responses_per_datapoint=total_responses,
+            data_type="text",
+            filters=[LanguageFilter(language_codes=[language])],
+        ).run()
+
+        logger.info("Text comparison order created and run successfully")
+
+        try:
+            order.view()
+        except Exception as e:
+            logger.error(f"Error viewing ranking make sure to update your rapidata version")
+        results = order.get_results()
+        results = [result["aggregatedResults"] for result in results["results"]]
+        logger.debug(f"Text comparison results: {results}")
+        logger.info("Successfully retrieved text comparison results")
+        return results
+    except Exception as e:
+        logger.error(f"Error in compare_texts: {str(e)}", exc_info=True)
+        return {"error": f"Failed to compare texts: {str(e)}"}
 
 if __name__ == "__main__":
     logger.info("Starting FastMCP server for rapidata")
