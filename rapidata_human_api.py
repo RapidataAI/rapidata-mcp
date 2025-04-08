@@ -2,7 +2,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import RequestId, RequestParams
 from rapidata import RapidataClient
 import os
-from typing import Any
+from typing import Any, Optional
 import logging
 import sys
 import time
@@ -22,7 +22,7 @@ sys.stdout = original_stdout
 
 # Configure logging
 logging.basicConfig(
-    level=logging.ERROR,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("rapidata_mcp.log"),
@@ -35,55 +35,121 @@ logger = logging.getLogger(__name__)
 logger.info("Initializing FastMCP server with name 'rapidata'")
 mcp = FastMCP("rapidata")
 
-# Try to set MCP logging if available
-# try:
-#     mcp.set_log_level("DEBUG")
-#     logger.info("Set FastMCP log level to DEBUG")
-# except (AttributeError, TypeError) as e:
-#     logger.warning(f"Could not set FastMCP log level: {str(e)}")
+@mcp.tool()
+async def get_free_text_responses(
+    name: str, 
+    instruction: str, 
+    total_responses: int = 5,
+) -> dict[str, Any]:
+    """get free text responses from humans
 
-def just_rank_it_lol(dir_path: str):
+    Will ask actual humans to provide some short free text responses to the question.
 
-    
-    original_stdout = sys.stdout
-    
-    sys.stdout = NullWriter()
-    client = RapidataClient()
+    Args:
+        name (str): The name of the order (will not effect the results but used to identify the order).
+        instruction (str): The question asked to the people. They will try to answer is. (example "Who is your favorite actor?")
+        total_responses (int): The total number of responses that will be collected. More responses will take SIGNIFICANTLY longer. defaults to 5.
 
-    client.order._set_priority(200)
+    Returns:
+        dict[str, Any]: dictionary containing the final elo rankings of the images
+    """
+    try:
+        logger.info(f"get_free_text_responses called with name: {name}, instruction: {instruction}")
+        logger.debug(f"Total responses: {total_responses}")
+        client = RapidataClient()
+        client.order._set_priority(200)
 
-    base_path = dir_path + "\\"
-    file_list = os.listdir(base_path)
-    paths = [base_path + path for path in file_list]
-    logger.info(f"Found {len(paths)} files in directory")
-    order = client.order.create_ranking_order(
-        name="ranking images",
-        instruction="Which image looks better?",
-        datapoints=paths,
-        responses_per_comparison=1,
-        total_comparison_budget=20,
-    )
-    logger.info("uploaded datapoints for order")
-    order.run()
-    logger.info("Ranking order execution started")
-    order.display_progress_bar()
-    results = order.get_results()
-    logger.info(f"got the results {results}")
-    results = results["summary"]
-    logger.info(f"got the results summary {results}")
-    # Restore the original stdout
-    sys.stdout = original_stdout
-    return results
+        datapoints = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
 
+        order = client.order.create_free_text_order(
+            name=name,
+            instruction=instruction,
+            datapoints=datapoints,
+            responses_per_datapoint=total_responses,
+        ).run()
+
+        logger.info("Free text order created and run successfully")
+
+        results = order.get_results()["results"][0]["aggregatedResults"]
+        logger.info("Successfully retrieved free text results")
+        return results
+    except Exception as e:
+        logger.error(f"Error in get_free_text_responses: {str(e)}", exc_info=True)
+        return {"error": f"Failed to get free text responses: {str(e)}"}
 
 @mcp.tool()
-async def rank_images(dir_path: str, ctx: Context) -> dict[str, Any]:
+async def classification(
+    name: str,
+    instruction: str,
+    answer_options: list[str],
+    dir_path: Optional[list[str]] = None,
+    total_responses: int = 25,
+):
+    """get classification responses from humans
+
+    Will ask actual humans to classify the images in the directory.
+
+    Args:
+        name (str): The name of the order (will not effect the results but used to identify the order).
+        instruction (str): The question asked to the people. They will try to select the answer based on the question. (example "What is shown in the image?")
+        answer_options (list[str]): The options that will be shown to the people. They will have to choose one of them. (maximum 6 options).
+            (example ["cat", "dog", "car", "tree"])
+        dir_path (Optional[list[str]]): path to the directory containing images. If not provided, a default image will be used.
+        total_responses (int): The total number of responses that will be collected. More responses will take longer but give a clearer results. defaults to 25.
+            if a directory is provided, this will be the number of responses PER image.
+
+    Returns:
+        list[dict[str, float]]: list of dictionaries containing the classification results for each image
+    """
+    try:
+        logger.info(f"classification called with name: {name}, instruction: {instruction}")
+        logger.debug(f"Answer options: {answer_options}")
+        client = RapidataClient()
+        client.order._set_priority(200)
+
+        if dir_path is None:
+            dir_path = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
+        else:
+            # Ensure dir_path is a list of full paths
+            dir_path = [os.path.abspath(path) for path in dir_path]
+            logger.debug(f"Full image paths: {dir_path}")
+
+        order = client.order.create_classification_order(
+            name=name,
+            instruction=instruction,
+            answer_options=answer_options,
+            datapoints=dir_path,
+            responses_per_datapoint=total_responses,
+        ).run()
+
+        logger.info("Classification order created and run successfully")
+
+        results = order.get_results()["results"]
+        weighted_results = [result["summedUserScoresRatios"] for result in results]
+        logger.debug(f"Weighted results: {weighted_results}")
+        logger.info("Successfully retrieved classification results")
+        return weighted_results
+    except Exception as e:
+        logger.error(f"Error in classification: {str(e)}", exc_info=True)
+        return {"error": f"Failed to get classification results: {str(e)}"}
+
+@mcp.tool()
+async def rank_images(dir_path: str, 
+                      name: str,
+                      instruction: str,
+                      total_comparison_budget: int = 25,
+                      ) -> dict[str, Any]:
     """rank images in a local dir based on *human* preference
 
     Will ask hundreds of actual humans to rank the images in the directory.
 
     Args:
         dir_path (str): path to the directory containing images
+        name (str): The name of the order (will not effect the results but used to identify the order).
+        instruction (str): The question asked to the people. Based on this they will rank the images. (example "Which image looks better?")
+            There will be pair wise matchups rated by humans. The results will effect the elo score of the images. The question will be shown with 2 images.
+        total_comparison_budget (int): The total number of comparisons to be made. This is the total number of pairwise matchups that will be shown to humans. 
+            The more images there are the more budget is required and the more precise the results will be. But it will also take longer. defaults to 25.
 
     Returns:
         dict[str, Any]: dictionary containing the final elo rankings of the images
@@ -91,29 +157,15 @@ async def rank_images(dir_path: str, ctx: Context) -> dict[str, Any]:
     # return just_rank_it_lol(dir_path)
     # Save the original stdout
     original_stdout = sys.stdout
-    
-    # client = RapidataClient()
-    # return client.order.get_order_by_id("67effdde6d58288f742de4bc").get_results()["summary"]
 
     # Redirect stdout to the NullWriter
     # sys.stdout = NullWriter()
 
     logger.info(f"rank_images called with dir_path: {dir_path}")
 
-    logger.info(f"request_context: {ctx.request_context}")
-    # progress_token = ctx.request_context.meta.progressToken
-    # logger.info(f"Extracted progress token: {progress_token}")
+    # logger.info(f"request_context: {ctx.request_context}")
 
-    # ctx.request_context.meta = RequestParams.Meta(progressToken=ctx.request_context.request_id)
-
-    logger.info(f"Updated request_context: {ctx.request_context}")
-    # for i in range(100):
-    #     await ctx.report_progress(i, 100)
-    #     logger.info(f"Progress: {i}%")
-    #     ctx.info(f"Progress: {i}%")
-    #     time.sleep(5)
-
-    # return {"winner": "image1.jpg", "request_context": ctx.request_context}
+    # logger.info(f"Updated request_context: {ctx.request_context}")
     
     try:
         logger.debug("Initializing RapidataClient")
@@ -151,11 +203,11 @@ async def rank_images(dir_path: str, ctx: Context) -> dict[str, Any]:
         logger.info("Creating ranking order")
         try:
             order = client.order.create_ranking_order(
-                name="ranking images",
-                instruction="Which image looks better?",
+                name=name,
+                instruction=instruction,
                 datapoints=paths,
                 responses_per_comparison=1,
-                total_comparison_budget=25,
+                total_comparison_budget=total_comparison_budget,
             )
             logger.info(f"Ranking order created successfully: {order}")
             logger.debug(f"Order details: {vars(order)}")
@@ -181,13 +233,13 @@ async def rank_images(dir_path: str, ctx: Context) -> dict[str, Any]:
         # Get results
         try:
             logger.info("Retrieving ranking results")
-            while order.get_status() == "Processing":
-                progress = order._workflow_progress.completion_percentage
-                await ctx.report_progress(progress, 100)
-                # ctx.info(f"Ranking order progress: {progress}%")
-                logger.info(f"Ranking order progress: {progress}%")
-                time.sleep(5)
-            logger.info("Ranking order completed")
+            # while order.get_status() == "Processing":
+            #     progress = order._workflow_progress.completion_percentage
+            #     await ctx.report_progress(progress, 100)
+            #     # ctx.info(f"Ranking order progress: {progress}%")
+            #     logger.info(f"Ranking order progress: {progress}%")
+            #     time.sleep(5)
+            # logger.info("Ranking order completed")
             results = order.get_results()
             logger.info(f"results: {results}")
             results = results["summary"]
