@@ -68,6 +68,11 @@ async def get_free_text_responses(
 
         logger.info("Free text order created and run successfully")
 
+
+        try:
+            order.view()
+        except Exception as e:
+            logger.error(f"Error viewing ranking make sure to update your rapidata version")
         results = order.get_results()["results"][0]["aggregatedResults"]
         logger.info("Successfully retrieved free text results")
         return results
@@ -121,6 +126,11 @@ async def classification(
         ).run()
 
         logger.info("Classification order created and run successfully")
+
+        try:
+            order.view()
+        except Exception as e:
+            logger.error(f"Error viewing ranking make sure to update your rapidata version")
 
         results = order.get_results()["results"]
         weighted_results = [result["summedUserScoresRatios"] for result in results]
@@ -186,7 +196,10 @@ async def rank_images(dir_path: str,
         try:
             logger.info("Running ranking order")
             order.run()
-            order.preview()
+            try:
+                order.view()
+            except Exception as e:
+                logger.error(f"Error viewing ranking make sure to update your rapidata version")
             logger.info("Ranking order execution started")
         except Exception as e:
             logger.error(f"Error running ranking order: {str(e)}", exc_info=True)
