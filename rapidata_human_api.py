@@ -1,11 +1,9 @@
-from mcp.server.fastmcp import FastMCP, Context
-from mcp.types import RequestId, RequestParams
+from mcp.server.fastmcp import FastMCP
 from rapidata import RapidataClient
 import os
 from typing import Any, Optional
 import logging
 import sys
-import time
 # Create a dummy object that ignores the output
 class NullWriter:
     def write(self, msg):
@@ -108,17 +106,17 @@ async def classification(
         client.order._set_priority(200)
 
         if dir_path is None:
-            dir_path = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
+            full_paths = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
         else:
-            # Ensure dir_path is a list of full paths
-            dir_path = [os.path.abspath(path) for path in dir_path]
+            files = os.listdir(dir_path)
+            full_paths = [os.path.join(dir_path, f) for f in files]
             logger.debug(f"Full image paths: {dir_path}")
 
         order = client.order.create_classification_order(
             name=name,
             instruction=instruction,
             answer_options=answer_options,
-            datapoints=dir_path,
+            datapoints=full_paths,
             responses_per_datapoint=total_responses,
         ).run()
 
@@ -154,18 +152,8 @@ async def rank_images(dir_path: str,
     Returns:
         dict[str, Any]: dictionary containing the final elo rankings of the images
     """
-    # return just_rank_it_lol(dir_path)
-    # Save the original stdout
-    original_stdout = sys.stdout
-
-    # Redirect stdout to the NullWriter
-    # sys.stdout = NullWriter()
-
     logger.info(f"rank_images called with dir_path: {dir_path}")
 
-    # logger.info(f"request_context: {ctx.request_context}")
-
-    # logger.info(f"Updated request_context: {ctx.request_context}")
     
     try:
         logger.debug("Initializing RapidataClient")
@@ -174,31 +162,10 @@ async def rank_images(dir_path: str,
         client.order._set_priority(200)
         
         # Create base path
-        base_path = dir_path + "\\"
-        logger.debug(f"Base path set to: {base_path}")
-        
-        # List image files
-        try:
-            file_list = os.listdir(base_path)
-            logger.info(f"Found {len(file_list)} files in directory")
-            logger.debug(f"Files in directory: {file_list}")
-        except FileNotFoundError:
-            logger.error(f"Directory not found: {base_path}")
-            
-            # Restore the original stdout
-            # sys.stdout = original_stdout
-            return {"error": f"Directory not found: {base_path}"}
-        except PermissionError:
-            logger.error(f"Permission denied when accessing directory: {base_path}")
-            
-            # Restore the original stdout
-            # sys.stdout = original_stdout
-            return {"error": f"Permission denied when accessing directory: {base_path}"}
-        
-        # Create full paths
-        paths = [base_path + path for path in file_list]
-        logger.debug(f"Full image paths: {paths}")
-        
+        files = os.listdir(dir_path)
+        paths = [os.path.join(dir_path, f) for f in files]
+        logger.debug(f"Full image paths: {dir_path}")
+
         # Create ranking order
         logger.info("Creating ranking order")
         try:
@@ -213,8 +180,6 @@ async def rank_images(dir_path: str,
             logger.debug(f"Order details: {vars(order)}")
         except Exception as e:
             logger.error(f"Error creating ranking order: {str(e)}", exc_info=True)
-            # Restore the original stdout
-            # sys.stdout = original_stdout
             return {"error": f"Failed to create ranking order: {str(e)}"}
         
         # Run the order
@@ -226,8 +191,6 @@ async def rank_images(dir_path: str,
         except Exception as e:
             logger.error(f"Error running ranking order: {str(e)}", exc_info=True)
             
-            # Restore the original stdout
-            # sys.stdout = original_stdout
             return {"error": f"Failed to run ranking order: {str(e)}"}
         
         # Get results
@@ -246,14 +209,10 @@ async def rank_images(dir_path: str,
             logger.info("Successfully retrieved ranking results")
             logger.debug(f"Ranking results: {results}")
             
-            # Restore the original stdout
-            # sys.stdout = original_stdout
             return results
         except Exception as e:
             logger.error(f"Error getting ranking results: {str(e)}", exc_info=True)
             
-            # Restore the original stdout
-            # sys.stdout = original_stdout
             return {"error": f"Failed to get ranking results: {str(e)}"}
             
     except Exception as e:
