@@ -80,7 +80,7 @@ async def classification(
     name: str,
     instruction: str,
     answer_options: list[str],
-    dir_path: Optional[list[str]] = None,
+    dir_path: Optional[str] = None,
     total_responses: int = 25,
 ):
     """get classification responses from humans
@@ -92,7 +92,7 @@ async def classification(
         instruction (str): The question asked to the people. They will try to select the answer based on the question. (example "What is shown in the image?")
         answer_options (list[str]): The options that will be shown to the people. They will have to choose one of them. (maximum 6 options).
             (example ["cat", "dog", "car", "tree"])
-        dir_path (Optional[list[str]]): path to the directory containing images. If not provided, a default image will be used.
+        dir_path (Optional[str]): path to the directory containing images. If not provided, a default image will be used.
         total_responses (int): The total number of responses that will be collected. More responses will take longer but give a clearer results. defaults to 25.
             if a directory is provided, this will be the number of responses PER image.
 
