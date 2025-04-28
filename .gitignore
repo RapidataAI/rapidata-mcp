@@ -10,3 +10,6 @@ wheels/
 .venv
 rapidata_mcp.log
 .env
+*.ipynb
+temp_images/
+rapidata_mcp.log
