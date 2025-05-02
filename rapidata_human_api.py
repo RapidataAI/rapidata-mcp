@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 from rapidata import RapidataClient, LanguageFilter
 import os
-from typing import Any, Optional
+from typing import Any, Optional, List
 import logging
 import sys
 # Create a dummy object that ignores the output
@@ -38,7 +38,8 @@ async def get_free_text_responses(
     name: str, 
     instruction: str, 
     total_responses: int = 5,
-) -> dict[str, Any]:
+    datapoints_dir: str = None
+) -> List[dict[str, Any]]:
     """get free text responses from humans
 
     Will ask actual humans to provide some short free text responses to the question.
@@ -47,18 +48,22 @@ async def get_free_text_responses(
         name (str): The name of the order (will not effect the results but used to identify the order).
         instruction (str): The question asked to the people. They will try to answer is. (example "Who is your favorite actor?")
         total_responses (int): The total number of responses that will be collected. More responses will take SIGNIFICANTLY longer. defaults to 5.
-
+        datapoints_dir: (str): optional images directory path to display these images below the question. If it is None, we will show a question mark
     Returns:
-        dict[str, Any]: dictionary containing the final elo rankings of the images
+        dict[str, Any]: List of dictionaries containing free text responses and the image filename
     """
     try:
         logger.info(f"get_free_text_responses called with name: {name}, instruction: {instruction}")
         logger.debug(f"Total responses: {total_responses}")
+
+        if datapoints_dir is None:
+            datapoints = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
+        else:
+            datapoints = [os.path.join(datapoints_dir, f) for f in os.listdir(datapoints_dir)]
+            assert all(os.path.exists(p) for p in datapoints)
+
         client = RapidataClient()
         client.order._set_priority(200)
-
-        datapoints = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
-
         order = client.order.create_free_text_order(
             name=name,
             instruction=instruction,
@@ -73,12 +78,13 @@ async def get_free_text_responses(
             order.view()
         except Exception as e:
             logger.error(f"Error viewing ranking make sure to update your rapidata version")
-        results = order.get_results()["results"][0]["aggregatedResults"]
+        results = order.get_results()["results"]
         logger.info("Successfully retrieved free text results")
+        results = [{result['originalFileName']: result["aggregatedResults"]} for result in results]
         return results
     except Exception as e:
         logger.error(f"Error in get_free_text_responses: {str(e)}", exc_info=True)
-        return {"error": f"Failed to get free text responses: {str(e)}"}
+        return [{"error": f"Failed to get free text responses: {str(e)}"}]
 
 @mcp.tool()
 async def classification(
