@@ -3,20 +3,6 @@ from rapidata import RapidataClient, LanguageFilter
 import os
 from typing import Any, Optional
 import logging
-import sys
-# Create a dummy object that ignores the output
-class NullWriter:
-    def write(self, msg):
-        pass
-
-# Save the original stdout
-original_stdout = sys.stdout
-
-# Redirect stdout to the NullWriter
-sys.stdout = NullWriter()
-
-# Restore the original stdout
-sys.stdout = original_stdout
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +24,7 @@ async def get_free_text_responses(
     name: str, 
     instruction: str, 
     total_responses: int = 5,
+    dir_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """get free text responses from humans
 
@@ -47,35 +34,47 @@ async def get_free_text_responses(
         name (str): The name of the order (will not effect the results but used to identify the order).
         instruction (str): The question asked to the people. They will try to answer is. (example "Who is your favorite actor?")
         total_responses (int): The total number of responses that will be collected. More responses will take SIGNIFICANTLY longer. defaults to 5.
+        dir_path (Optional[str]): path to the directory containing images. If not provided, a default image will be used.
+            If provided, the images in the directory will be used as datapoints. (EACH datapoint will get the amount of responses specified in total_responses)
 
     Returns:
         dict[str, Any]: dictionary containing the final elo rankings of the images
     """
+    logger.info(f"get_free_text_responses called with name: {name}, instruction: {instruction}")
+    logger.debug(f"Total responses: {total_responses}, dir_path: {dir_path}")
+    
     try:
-        logger.info(f"get_free_text_responses called with name: {name}, instruction: {instruction}")
-        logger.debug(f"Total responses: {total_responses}")
         client = RapidataClient()
-        client.order._set_priority(200)
 
-        datapoints = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
+        if dir_path is not None:
+            files = os.listdir(dir_path)
+            datapoints = [os.path.join(dir_path, f) for f in files]
+            logger.debug(f"Using images from directory: {dir_path}")
+        else:
+            datapoints = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
+            logger.debug("No directory path provided, using default image")
 
+        logger.info("Creating free text order")
         order = client.order.create_free_text_order(
             name=name,
             instruction=instruction,
             datapoints=datapoints,
             responses_per_datapoint=total_responses,
         ).run()
-
+        
         logger.info("Free text order created and run successfully")
-
 
         try:
             order.view()
         except Exception as e:
-            logger.error(f"Error viewing ranking make sure to update your rapidata version")
-        results = order.get_results()["results"][0]["aggregatedResults"]
+            logger.error(f"Error viewing order: {str(e)}. Make sure to update your rapidata version.")
+        
+        results = order.get_results()
+        processed_results = {result["originalFileName"]: result["aggregatedResults"] for result in results["results"]}
+        logger.debug(f"Free text results processed: {processed_results}")
         logger.info("Successfully retrieved free text results")
-        return results
+        
+        return processed_results
     except Exception as e:
         logger.error(f"Error in get_free_text_responses: {str(e)}", exc_info=True)
         return {"error": f"Failed to get free text responses: {str(e)}"}
@@ -104,19 +103,21 @@ async def classification(
     Returns:
         list[dict[str, float]]: list of dictionaries containing the classification results for each image
     """
+    logger.info(f"classification called with name: {name}, instruction: {instruction}")
+    logger.debug(f"Answer options: {answer_options}, total_responses: {total_responses}, dir_path: {dir_path}")
+    
     try:
-        logger.info(f"classification called with name: {name}, instruction: {instruction}")
-        logger.debug(f"Answer options: {answer_options}")
         client = RapidataClient()
-        client.order._set_priority(200)
 
-        if dir_path is None:
-            full_paths = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
-        else:
+        if dir_path is not None:
             files = os.listdir(dir_path)
             full_paths = [os.path.join(dir_path, f) for f in files]
-            logger.debug(f"Full image paths: {dir_path}")
+            logger.debug(f"Using images from directory: {dir_path}")
+        else:
+            full_paths = ["https://assets.rapidata.ai/152c11b5-c428-4489-ad83-1651ebfe0efd.jpeg"]
+            logger.debug("No directory path provided, using default image")
 
+        logger.info("Creating classification order")
         order = client.order.create_classification_order(
             name=name,
             instruction=instruction,
@@ -130,23 +131,25 @@ async def classification(
         try:
             order.view()
         except Exception as e:
-            logger.error(f"Error viewing ranking make sure to update your rapidata version")
+            logger.error(f"Error viewing order: {str(e)}. Make sure to update your rapidata version.")
 
         results = order.get_results()["results"]
-        weighted_results = [result["aggregatedResults"] for result in results]
-        logger.debug(f"Weighted results: {weighted_results}")
+        processed_results = {result["originalFileName"]: result["summedUserScoresRatios"] for result in results}
+        logger.debug(f"Classification results processed")
         logger.info("Successfully retrieved classification results")
-        return weighted_results
+        
+        return processed_results
     except Exception as e:
         logger.error(f"Error in classification: {str(e)}", exc_info=True)
         return {"error": f"Failed to get classification results: {str(e)}"}
 
 @mcp.tool()
-async def rank_images(dir_path: str, 
-                      name: str,
-                      instruction: str,
-                      total_comparison_budget: int = 25,
-                      ) -> dict[str, Any]:
+async def rank_images(
+    dir_path: str, 
+    name: str,
+    instruction: str,
+    total_comparison_budget: int = 25,
+) -> dict[str, Any]:
     """rank images in a local dir based on *human* preference
 
     Will ask hundreds of actual humans to rank the images in the directory.
@@ -162,78 +165,41 @@ async def rank_images(dir_path: str,
     Returns:
         dict[str, Any]: dictionary containing the final elo rankings of the images
     """
-    logger.info(f"rank_images called with dir_path: {dir_path}")
-
+    logger.info(f"rank_images called with name: {name}, instruction: {instruction}, dir_path: {dir_path}")
+    logger.debug(f"Total comparison budget: {total_comparison_budget}")
     
     try:
-        logger.debug("Initializing RapidataClient")
         client = RapidataClient()
-        logger.debug("Setting order priority to 200")
-        client.order._set_priority(200)
         
-        # Create base path
         files = os.listdir(dir_path)
         paths = [os.path.join(dir_path, f) for f in files]
-        logger.debug(f"Full image paths: {dir_path}")
+        logger.debug(f"Using images from directory: {dir_path}")
 
-        # Create ranking order
         logger.info("Creating ranking order")
-        try:
-            order = client.order.create_ranking_order(
-                name=name,
-                instruction=instruction,
-                datapoints=paths,
-                responses_per_comparison=1,
-                total_comparison_budget=total_comparison_budget,
-            )
-            logger.info(f"Ranking order created successfully: {order}")
-            logger.debug(f"Order details: {vars(order)}")
-        except Exception as e:
-            logger.error(f"Error creating ranking order: {str(e)}", exc_info=True)
-            return {"error": f"Failed to create ranking order: {str(e)}"}
+        order = client.order.create_ranking_order(
+            name=name,
+            instruction=instruction,
+            datapoints=paths,
+            responses_per_comparison=1,
+            total_comparison_budget=total_comparison_budget,
+        ).run()
         
-        # Run the order
-        try:
-            logger.info("Running ranking order")
-            order.run()
-            try:
-                order.view()
-            except Exception as e:
-                logger.error(f"Error viewing ranking make sure to update your rapidata version")
-            logger.info("Ranking order execution started")
-        except Exception as e:
-            logger.error(f"Error running ranking order: {str(e)}", exc_info=True)
-            
-            return {"error": f"Failed to run ranking order: {str(e)}"}
+        logger.info("Ranking order created and run successfully")
         
-        # Get results
         try:
-            logger.info("Retrieving ranking results")
-            # while order.get_status() == "Processing":
-            #     progress = order._workflow_progress.completion_percentage
-            #     await ctx.report_progress(progress, 100)
-            #     # ctx.info(f"Ranking order progress: {progress}%")
-            #     logger.info(f"Ranking order progress: {progress}%")
-            #     time.sleep(5)
-            # logger.info("Ranking order completed")
-            results = order.get_results()
-            logger.info(f"results: {results}")
-            results = results["summary"]
-            logger.info("Successfully retrieved ranking results")
-            logger.debug(f"Ranking results: {results}")
-            
-            return results
+            order.view()
         except Exception as e:
-            logger.error(f"Error getting ranking results: {str(e)}", exc_info=True)
-            
-            return {"error": f"Failed to get ranking results: {str(e)}"}
-            
+            logger.error(f"Error viewing order: {str(e)}. Make sure to update your rapidata version.")
+        
+        results = order.get_results()
+        processed_results = results["summary"]
+        logger.debug(f"Ranking results processed")
+        logger.info("Successfully retrieved ranking results")
+        
+        return processed_results  
     except Exception as e:
-        logger.critical(f"Unexpected error in rank_images: {str(e)}", exc_info=True)
-        
-        # Restore the original stdout
-        # sys.stdout = original_stdout
-        return {"error": f"Unexpected error: {str(e)}"}
+        logger.error(f"Error in rank_images: {str(e)}", exc_info=True)
+        return {"error": f"Failed to rank images: {str(e)}"}
 
 @mcp.tool()
 async def compare_texts(
@@ -257,12 +223,13 @@ async def compare_texts(
     Returns:
         list[dict[str, int]]: list of dictionaries containing the comparison results for each pair of texts
     """
+    logger.info(f"compare_texts called with name: {name}, instruction: {instruction}")
+    logger.debug(f"Total responses: {total_responses}, language: {language}")
+    
     try:
-        logger.info(f"compare_texts called with name: {name}, instruction: {instruction}")
-        logger.debug(f"Total responses: {total_responses}")
         client = RapidataClient()
-        client.order._set_priority(200)
 
+        logger.info("Creating text comparison order")
         order = client.order.create_compare_order(
             name=name,
             instruction=instruction,
@@ -277,12 +244,14 @@ async def compare_texts(
         try:
             order.view()
         except Exception as e:
-            logger.error(f"Error viewing ranking make sure to update your rapidata version")
+            logger.error(f"Error viewing order: {str(e)}. Make sure to update your rapidata version.")
+        
         results = order.get_results()
-        results = [result["aggregatedResults"] for result in results["results"]]
-        logger.debug(f"Text comparison results: {results}")
+        processed_results = [result["aggregatedResults"] for result in results["results"]]
+        logger.debug(f"Text comparison results processed")
         logger.info("Successfully retrieved text comparison results")
-        return results
+        
+        return processed_results
     except Exception as e:
         logger.error(f"Error in compare_texts: {str(e)}", exc_info=True)
         return {"error": f"Failed to compare texts: {str(e)}"}
