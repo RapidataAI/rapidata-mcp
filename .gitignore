@@ -11,3 +11,4 @@ wheels/
 rapidata_mcp.log
 .env
 *.ipynb
+*.log
