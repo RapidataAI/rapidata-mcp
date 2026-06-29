@@ -8,7 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
-rapidata_mcp.log
+
+# Tooling caches
+.ruff_cache/
+.pyright/
+
+# Local config / logs
 .env
-*.ipynb
 *.log
