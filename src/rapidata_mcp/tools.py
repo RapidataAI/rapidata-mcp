@@ -61,23 +61,28 @@ def register_tools(
         answer_options: list[str],
         datapoint_urls: list[str],
         responses_per_datapoint: int = 10,
+        contexts: list[str] | None = None,
         confidence_threshold: float | None = None,
     ) -> dict[str, Any]:
         """Create a classification task where humans pick one answer option per item.
 
-        The task is created in draft and does NOT start collecting responses (or
-        spend) until you call ``run_task``. Datapoints must be publicly
-        reachable URLs (image/video/audio, or plain text). Returns the order id,
-        a details URL to inspect it, and ``total_responses`` — the number of
-        human responses that will be collected (datapoints x
-        responses_per_datapoint), which is what drives cost.
+        Runs on the global audience (no targeting). The task is created in draft
+        and does NOT start collecting responses (or spend) until you call
+        ``run_task``. Datapoints must be publicly reachable URLs (image/video/
+        audio, or plain text). Returns the order id, a details URL to inspect it,
+        and ``total_responses`` — the number of human responses that will be
+        collected (datapoints x responses_per_datapoint), which is what drives
+        cost.
 
         Args:
             name: Internal label for the task (not shown to annotators).
-            instruction: What annotators should do.
+            instruction: The question annotators answer.
             answer_options: The options annotators choose from (at least two).
             datapoint_urls: One URL per item to be labeled.
             responses_per_datapoint: Human responses collected per item.
+            contexts: Optional per-datapoint text context, shown alongside the
+                instruction. If given, must have one entry per datapoint (same
+                length as datapoint_urls).
             confidence_threshold: Optional early-stop; stops a datapoint once
                 this confidence is reached or the response cap is hit.
         """
@@ -85,6 +90,11 @@ def register_tools(
             raise ValueError("answer_options must contain at least two options")
         if not datapoint_urls:
             raise ValueError("datapoint_urls must not be empty")
+        if contexts is not None and len(contexts) != len(datapoint_urls):
+            raise ValueError(
+                "contexts, when provided, must have one entry per datapoint "
+                "(same length as datapoint_urls)"
+            )
 
         order = _client().order.create_classification_order(
             name=name,
@@ -92,6 +102,7 @@ def register_tools(
             answer_options=answer_options,
             datapoints=datapoint_urls,
             responses_per_datapoint=responses_per_datapoint,
+            contexts=contexts,
             confidence_threshold=confidence_threshold,
         )
         return {
@@ -109,20 +120,24 @@ def register_tools(
         instruction: str,
         comparison_pairs: list[list[str]],
         responses_per_datapoint: int = 10,
+        contexts: list[str] | None = None,
         confidence_threshold: float | None = None,
     ) -> dict[str, Any]:
         """Create a pairwise comparison task: humans choose between two items each.
 
-        Useful for evaluating or ranking outputs (e.g. which of two images
-        better matches a prompt). Like classification, it is created in draft and
-        only spends once ``run_task`` is called. Each pair must hold exactly two
-        publicly reachable URLs.
+        Runs on the global audience (no targeting). Useful for evaluating or
+        ranking outputs (e.g. which of two images better matches a prompt). Like
+        classification, it is created in draft and only spends once ``run_task``
+        is called. Each pair must hold exactly two publicly reachable URLs.
 
         Args:
             name: Internal label for the task (not shown to annotators).
             instruction: The question annotators answer for each pair.
             comparison_pairs: List of [item_a_url, item_b_url] pairs.
             responses_per_datapoint: Human responses collected per pair.
+            contexts: Optional per-pair text context, shown alongside the
+                instruction. If given, must have one entry per pair (same length
+                as comparison_pairs).
             confidence_threshold: Optional early-stop per pair.
         """
         if not comparison_pairs:
@@ -130,12 +145,18 @@ def register_tools(
         for i, pair in enumerate(comparison_pairs):
             if len(pair) != 2:
                 raise ValueError(f"comparison_pairs[{i}] must have exactly two items")
+        if contexts is not None and len(contexts) != len(comparison_pairs):
+            raise ValueError(
+                "contexts, when provided, must have one entry per pair "
+                "(same length as comparison_pairs)"
+            )
 
         order = _client().order.create_compare_order(
             name=name,
             instruction=instruction,
             datapoints=comparison_pairs,
             responses_per_datapoint=responses_per_datapoint,
+            contexts=contexts,
             confidence_threshold=confidence_threshold,
         )
         return {

@@ -16,6 +16,9 @@ Public endpoint: **`https://mcp.rapidata.ai/mcp`**
 |---|---|
 | `create_classification_task` | Humans pick one option per item. Draft only — **no spend**. |
 | `create_comparison_task` | Pairwise comparison (choose between two). Draft only — **no spend**. |
+
+Both create tools run on the **global audience** (no targeting) and take the same core parameters: the **question** (`instruction`), the **images as URLs** (`datapoint_urls` / `comparison_pairs`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**.
+
 | `run_task` | Start collecting responses — **the single step that spends.** |
 | `get_task_status` | Current status of a task. |
 | `get_task_results` | Partial while running, final once complete; **never blocks.** |
