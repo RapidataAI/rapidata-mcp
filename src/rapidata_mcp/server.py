@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 
 _METADATA_PATH = "/.well-known/oauth-protected-resource"
 _MCP_PATH = "/mcp"
-_DEFAULT_SCOPES = ["openid", "profile", "email", "roles", "offline_access"]
+# "mcp" is the scope that carries https://mcp.rapidata.ai as an OAuth resource on
+# the auth server; clients must request it so the auth server accepts the RFC 8707
+# resource indicator they send for this server (otherwise: invalid_target).
+_DEFAULT_SCOPES = ["openid", "profile", "email", "roles", "offline_access", "mcp"]
 
 
 def _env_flag(name: str) -> bool:
