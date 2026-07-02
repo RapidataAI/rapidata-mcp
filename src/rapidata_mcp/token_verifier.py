@@ -11,6 +11,7 @@ forward it to the API gateway, which scopes data access by that customer.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import httpx
 import jwt
@@ -44,22 +45,48 @@ class JWTVerifier(TokenVerifier):
             by the token's customer, so this is normally left unset.
         leeway: Clock-skew allowance in seconds for the expiry check.
         """
-        self._issuer = issuer_url
+        self._configured_issuer = issuer_url
         base = issuer_url.rstrip("/")
         self._discovery_url = f"{base}/.well-known/openid-configuration"
         self._explicit_jwks_uri = jwks_uri
         self._audience = audience
         self._leeway = leeway
         self._jwks_client: PyJWKClient | None = None
+        self._discovery_document: dict[str, Any] | None = None
+        self._issuer: str | None = None
+
+    def _fetch_discovery(self) -> dict[str, Any]:
+        # Fetched once and cached; both the JWKS URI and the expected issuer come
+        # from here so they always agree with what the authorization server advertises.
+        document = self._discovery_document
+        if document is None:
+            resp = httpx.get(self._discovery_url, timeout=10.0)
+            resp.raise_for_status()
+            document = resp.json()
+            self._discovery_document = document
+        return document
 
     def _resolve_jwks_uri(self) -> str:
         if self._explicit_jwks_uri:
             return self._explicit_jwks_uri
-        resp = httpx.get(self._discovery_url, timeout=10.0)
-        resp.raise_for_status()
-        jwks_uri = resp.json()["jwks_uri"]
+        jwks_uri = self._fetch_discovery()["jwks_uri"]
         logger.info("Resolved JWKS URI from discovery: %s", jwks_uri)
         return jwks_uri
+
+    def _resolve_issuer(self) -> str:
+        # The iss claim must equal the issuer published in OIDC discovery, which can
+        # differ from the configured base URL by a trailing slash — OpenIddict issues
+        # https://auth.rapidata.ai/ while the configured value is stripped. Trust
+        # discovery over the configured value; fall back when discovery is bypassed.
+        if self._issuer is not None:
+            return self._issuer
+        issuer = self._configured_issuer
+        if not self._explicit_jwks_uri:
+            discovered = self._fetch_discovery().get("issuer")
+            if isinstance(discovered, str):
+                issuer = discovered
+        self._issuer = issuer
+        return issuer
 
     def _get_jwks_client(self) -> PyJWKClient:
         # Built lazily and cached; PyJWKClient caches signing keys internally
@@ -75,7 +102,7 @@ class JWTVerifier(TokenVerifier):
                 token,
                 signing_key.key,
                 algorithms=_ALLOWED_ALGORITHMS,
-                issuer=self._issuer,
+                issuer=self._resolve_issuer(),
                 audience=self._audience,
                 leeway=self._leeway,
                 options={
