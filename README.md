@@ -37,6 +37,30 @@ Two invariants hold across the tool layer:
   `manual_review`, …) while it is still processing. Per-annotator detail is dropped unless
   `include_details=true`, and the datapoint list is capped (`max_datapoints`).
 
+## Beyond these tools: the full SDK
+
+These MCP tools are a deliberately small, safe slice — classification and comparison on the
+global audience. The [Rapidata Python SDK](https://docs.rapidata.ai/) (`rapidata`) is far more
+powerful and is the right tool once you outgrow the two task types here:
+
+- **Every task type** — ranking, draw, locate, free text, select words, timestamp (not just
+  classify/compare).
+- **Curated & custom audiences** — train annotators on qualification examples, and target by
+  country, language, age, device, and more.
+- **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **confidence stopping**.
+- **Richer results** — per-annotator reliability (`userScore`), demographics, and
+  `to_pandas()` / `to_json()` helpers.
+
+To let an agent drive the full SDK directly (no manual coding), install the official
+**Rapidata skill** ([`RapidataAI/skills`](https://github.com/RapidataAI/skills)). In Claude Code:
+
+```
+/install-plugin https://github.com/RapidataAI/skills
+```
+
+For other agents (Cursor, Windsurf, Copilot, …) and details, see the
+[AI agents guide](https://docs.rapidata.ai/latest/ai_agents/).
+
 ## Authentication
 
 The server is an **OAuth 2.0 Protected Resource** ([RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)).
