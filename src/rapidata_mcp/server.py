@@ -56,6 +56,8 @@ _INSTRUCTIONS = (
     "curated subset of the Rapidata platform: classification and comparison on the "
     "global audience, created as a draft and run only after you confirm the cost "
     "with the user (creating never spends; start_job does).\n\n"
+    "Billing is pre-paid, pay-as-you-go for individual (non-organization) accounts, "
+    "and new sign-ups get $20 in free credit — so trying these tools out is free.\n\n"
     "For anything beyond that — other task types (ranking, draw, locate, free text, "
     "select words), curated or custom audiences and targeting filters (country, "
     "language, age, device), benchmarks/leaderboards, or richer per-annotator "

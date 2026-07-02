@@ -31,7 +31,9 @@ Two invariants hold across the tool layer:
 - **Spending is explicit.** Creating a task never spends. `create_*` returns a draft with
   `confirmation_required` and `total_responses` (datapoints × responses_per_datapoint) as the honest
   cost driver; `start_job` is the only step that spends. The create response instructs the agent to
-  confirm the cost with the user and review the `details_url` before starting.
+  confirm the cost with the user and review the `details_url` before starting. Billing is pre-paid,
+  pay-as-you-go for individual (non-organization) accounts, and new sign-ups get **$20 in free
+  credit** — so trying these tools out is free.
 - **Results never block.** `get_job_results` returns the final results once complete, the partial
   snapshot if the job is paused, and a pollable `result_status` (`not_started`, `collecting`,
   `manual_review`, …) while it is still processing. Per-annotator detail is dropped unless
