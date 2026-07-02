@@ -33,7 +33,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from rapidata_mcp.auth import ClientProvider, EnvClientProvider, TokenClientProvider
@@ -67,6 +67,93 @@ _INSTRUCTIONS = (
     "`/install-plugin https://github.com/RapidataAI/skills`; for other agents see "
     "https://docs.rapidata.ai/latest/ai_agents/ . SDK docs: https://docs.rapidata.ai/"
 )
+
+
+# Shown to a human who opens the endpoint in a browser (the /mcp path is a
+# machine endpoint, so a plain visit would otherwise just 401). MCP clients are
+# unaffected: they never send Accept: text/html.
+_OVERVIEW_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rapidata MCP Server</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    max-width: 42rem; margin: 4rem auto; padding: 0 1.25rem;
+  }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  .sub { color: #6b7280; margin-top: 0; }
+  code {
+    background: rgba(127,127,127,.15); padding: .15em .4em; border-radius: .3em;
+  }
+  .card {
+    background: rgba(127,127,127,.08); border-radius: .6em;
+    padding: 1rem 1.25rem; margin: 1.5rem 0;
+  }
+  a { color: #2563eb; }
+  ul { padding-left: 1.2rem; }
+</style>
+</head>
+<body>
+  <h1>Rapidata MCP Server</h1>
+  <p class="sub">Real human feedback and labeling for your AI agent.</p>
+  <p>This is the
+     <a href="https://modelcontextprotocol.io">Model Context Protocol</a>
+     endpoint for <a href="https://www.rapidata.ai">Rapidata</a>. It's a machine
+     endpoint meant to be added to an MCP-capable client (Claude, Cursor, and
+     others) — not browsed directly. Point your client at it and it can create
+     classification and comparison tasks, run them on a global crowd of humans,
+     and read the results.</p>
+  <div class="card">
+    <strong>Connect</strong>
+    <p style="margin:.5rem 0 0">
+      Add this URL as a custom connector / remote MCP server:
+    </p>
+    <p style="margin:.5rem 0 0"><code>https://mcp.rapidata.ai/mcp</code></p>
+    <p style="margin:.5rem 0 0">
+      You'll sign in once with your Rapidata account. New accounts get
+      <strong>$20 in free credit</strong>, so trying it out is free.
+    </p>
+  </div>
+  <p>Learn more:</p>
+  <ul>
+    <li><a href="https://docs.rapidata.ai/">Rapidata documentation</a></li>
+    <li>
+      <a href="https://docs.rapidata.ai/latest/ai_agents/">Use the full
+      Rapidata SDK from an agent</a>
+    </li>
+    <li><a href="https://www.rapidata.ai">rapidata.ai</a></li>
+  </ul>
+</body>
+</html>"""
+
+
+class _BrowserLandingApp:
+    """Serves an HTML overview to browsers and delegates everything else.
+
+    Wraps the /mcp endpoint so a human who opens the URL sees what this is,
+    while MCP protocol traffic and the OAuth discovery 401 pass through — those
+    requests never send Accept: text/html, so they're never intercepted.
+    """
+
+    def __init__(self, app, html: str) -> None:
+        self._app = app
+        self._html = html
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("method") == "GET":
+            accept = b""
+            for key, value in scope.get("headers", []):
+                if key == b"accept":
+                    accept = value
+                    break
+            if b"text/html" in accept.lower():
+                await HTMLResponse(self._html)(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
 
 
 def _env_flag(name: str) -> bool:
@@ -183,14 +270,18 @@ def build_app(settings: Settings | None = None) -> Starlette:
     async def health(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    async def landing(request: Request) -> HTMLResponse:
+        return HTMLResponse(_OVERVIEW_HTML)
+
     routes = [
+        Route("/", landing, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
         Route(_METADATA_PATH, protected_resource_metadata, methods=["GET"]),
     ]
     middleware: list[Middleware] = []
 
     if settings.auth_disabled:
-        routes.append(Route(_MCP_PATH, endpoint=streamable_asgi))
+        mcp_endpoint = streamable_asgi
     else:
         verifier = JWTVerifier(settings.issuer_url)
         middleware = [
@@ -201,14 +292,18 @@ def build_app(settings: Settings | None = None) -> Starlette:
         ]
         # required_scopes=[] enforces only a valid token; the metadata above
         # advertises the supported scopes a client should request.
-        guarded = RequireAuthMiddleware(
+        mcp_endpoint = RequireAuthMiddleware(
             streamable_asgi,
             required_scopes=[],
             resource_metadata_url=AnyHttpUrl(
                 f"{settings.resource_url}{_METADATA_PATH}"
             ),
         )
-        routes.append(Route(_MCP_PATH, endpoint=guarded))
+
+    # Wrap so a browser opening the URL gets the overview; MCP traffic passes through.
+    routes.append(
+        Route(_MCP_PATH, endpoint=_BrowserLandingApp(mcp_endpoint, _OVERVIEW_HTML))
+    )
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):
