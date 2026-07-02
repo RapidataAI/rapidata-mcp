@@ -219,7 +219,12 @@ client ──Bearer JWT──▶ /mcp ──▶ RequireAuth ─▶ FastMCP tools
 
 ## Scope (Stage 1)
 
-URL datapoints only (no local upload), classification + comparison only, default audience (no
-targeting/filters), no validation sets / signals / flows / leaderboards. Those are later stages. The
-order-manager API used here is marked deprecated in the SDK in favour of `job` + `audience`; kept for
-Stage 1 simplicity, migration is a sensible follow-up.
+URL datapoints only (no local upload), classification + comparison only, the global audience (no
+targeting/filters), no validation sets / signals / flows / leaderboards. Those are later stages, and
+the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
+above). Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
+`start_job` assigns it to the global audience.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
