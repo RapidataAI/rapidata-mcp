@@ -23,6 +23,8 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from mcp.types import ToolAnnotations
+
 from rapidata_mcp.auth import ClientProvider
 from rapidata_mcp.results import summarize_results
 
@@ -114,7 +116,15 @@ def register_tools(
             ),
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create classification task",
+        annotations=ToolAnnotations(
+            title="Create classification task",
+            # Creates a reversible draft job definition; no spend, nothing destroyed.
+            readOnlyHint=False,
+            destructiveHint=False,
+        ),
+    )
     def create_classification_task(
         name: str,
         instruction: str,
@@ -167,7 +177,14 @@ def register_tools(
         )
         return _draft_result(definition, len(datapoints) * responses_per_datapoint)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create comparison task",
+        annotations=ToolAnnotations(
+            title="Create comparison task",
+            readOnlyHint=False,
+            destructiveHint=False,
+        ),
+    )
     def create_comparison_task(
         name: str,
         instruction: str,
@@ -218,7 +235,17 @@ def register_tools(
             definition, len(comparison_pairs) * responses_per_datapoint
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Start job (spends)",
+        annotations=ToolAnnotations(
+            title="Start job (spends)",
+            # Runs the job on the global audience: begins collecting and spending,
+            # which is not reversible — flag it as the one destructive action.
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+        ),
+    )
     def start_job(job_definition_id: str) -> dict[str, Any]:
         """Start a draft job definition on the global audience. This step spends.
 
@@ -239,7 +266,10 @@ def register_tools(
             "started": True,
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get job status",
+        annotations=ToolAnnotations(title="Get job status", readOnlyHint=True),
+    )
     def get_job_status(job_id: str) -> dict[str, Any]:
         """Get the current status of a running job without fetching results."""
         job = _job(job_id)
@@ -249,7 +279,10 @@ def register_tools(
             "details_url": job.job_details_page,
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get job results",
+        annotations=ToolAnnotations(title="Get job results", readOnlyHint=True),
+    )
     def get_job_results(
         job_id: str,
         include_details: bool = False,
@@ -308,7 +341,10 @@ def register_tools(
             **summarize_results(results, include_details, max_datapoints),
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List jobs",
+        annotations=ToolAnnotations(title="List jobs", readOnlyHint=True),
+    )
     def list_jobs(name_contains: str = "", limit: int = 10) -> dict[str, Any]:
         """List your most recent jobs, newest first."""
         jobs = _client().job.find_jobs(name=name_contains, amount=limit)
@@ -324,7 +360,16 @@ def register_tools(
             ]
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Pause job",
+        annotations=ToolAnnotations(
+            title="Pause job",
+            # Stops collecting/spending; reversible (the job can be resumed).
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+        ),
+    )
     def pause_job(job_id: str) -> dict[str, Any]:
         """Pause a running job to stop collecting further responses (and spending)."""
         job = _job(job_id)

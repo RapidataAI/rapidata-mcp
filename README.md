@@ -31,11 +31,37 @@ Two invariants hold across the tool layer:
 - **Spending is explicit.** Creating a task never spends. `create_*` returns a draft with
   `confirmation_required` and `total_responses` (datapoints × responses_per_datapoint) as the honest
   cost driver; `start_job` is the only step that spends. The create response instructs the agent to
-  confirm the cost with the user and review the `details_url` before starting.
+  confirm the cost with the user and review the `details_url` before starting. Billing is pre-paid,
+  pay-as-you-go for individual (non-organization) accounts, and new sign-ups get **$20 in free
+  credit** — so trying these tools out is free.
 - **Results never block.** `get_job_results` returns the final results once complete, the partial
   snapshot if the job is paused, and a pollable `result_status` (`not_started`, `collecting`,
   `manual_review`, …) while it is still processing. Per-annotator detail is dropped unless
   `include_details=true`, and the datapoint list is capped (`max_datapoints`).
+
+## Beyond these tools: the full SDK
+
+These MCP tools are a deliberately small, safe slice — classification and comparison on the
+global audience. The [Rapidata Python SDK](https://docs.rapidata.ai/) (`rapidata`) is far more
+powerful and is the right tool once you outgrow the two task types here:
+
+- **Every task type** — ranking, draw, locate, free text, select words, timestamp (not just
+  classify/compare).
+- **Curated & custom audiences** — train annotators on qualification examples, and target by
+  country, language, age, device, and more.
+- **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **confidence stopping**.
+- **Richer results** — per-annotator reliability (`userScore`), demographics, and
+  `to_pandas()` / `to_json()` helpers.
+
+To let an agent drive the full SDK directly (no manual coding), install the official
+**Rapidata skill** ([`RapidataAI/skills`](https://github.com/RapidataAI/skills)). In Claude Code:
+
+```
+/install-plugin https://github.com/RapidataAI/skills
+```
+
+For other agents (Cursor, Windsurf, Copilot, …) and details, see the
+[AI agents guide](https://docs.rapidata.ai/latest/ai_agents/).
 
 ## Authentication
 

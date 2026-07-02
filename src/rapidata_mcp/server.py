@@ -49,6 +49,25 @@ _MCP_PATH = "/mcp"
 # resource indicator they send for this server (otherwise: invalid_target).
 _DEFAULT_SCOPES = ["openid", "profile", "email", "roles", "offline_access", "mcp"]
 
+# Surfaced to the connecting agent via the MCP initialize response so it knows,
+# up front, that these tools are only a slice of Rapidata and where to go for more.
+_INSTRUCTIONS = (
+    "Rapidata runs human-in-the-loop labeling tasks. These tools are a small, "
+    "curated subset of the Rapidata platform: classification and comparison on the "
+    "global audience, created as a draft and run only after you confirm the cost "
+    "with the user (creating never spends; start_job does).\n\n"
+    "Billing is pre-paid, pay-as-you-go for individual (non-organization) accounts, "
+    "and new sign-ups get $20 in free credit — so trying these tools out is free.\n\n"
+    "For anything beyond that — other task types (ranking, draw, locate, free text, "
+    "select words), curated or custom audiences and targeting filters (country, "
+    "language, age, device), benchmarks/leaderboards, or richer per-annotator "
+    "results — use the full Rapidata Python SDK directly instead of these tools. "
+    "The easiest way is to install the official Rapidata skill, which teaches the "
+    "agent to write Rapidata SDK code: in Claude Code run "
+    "`/install-plugin https://github.com/RapidataAI/skills`; for other agents see "
+    "https://docs.rapidata.ai/latest/ai_agents/ . SDK docs: https://docs.rapidata.ai/"
+)
+
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
@@ -135,7 +154,12 @@ def build_app(settings: Settings | None = None) -> Starlette:
     else:
         provider_factory = _token_provider_factory(settings.environment)
 
-    mcp = FastMCP("rapidata", stateless_http=True, json_response=False)
+    mcp = FastMCP(
+        "rapidata",
+        instructions=_INSTRUCTIONS,
+        stateless_http=True,
+        json_response=False,
+    )
     register_tools(mcp, provider_factory)
 
     # Build the Streamable-HTTP transport directly so the OAuth shell below is
