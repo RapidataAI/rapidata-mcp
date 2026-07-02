@@ -12,28 +12,30 @@ Public endpoint: **`https://mcp.rapidata.ai/mcp`**
 
 ## Tools
 
+Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (a draft template), and `start_job` runs that definition on the **global audience**, producing a **job** you then poll and read.
+
 | Tool | Purpose |
 |---|---|
-| `create_classification_task` | Humans pick one option per item. Draft only — **no spend**. |
-| `create_comparison_task` | Pairwise comparison (choose between two). Draft only — **no spend**. |
+| `create_classification_task` | Humans pick one option per item. Creates a draft job definition — **no spend**. |
+| `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition — **no spend**. |
+| `start_job` | Run a draft job definition on the global audience — **the single step that spends.** |
+| `get_job_status` | Current status of a job. |
+| `get_job_results` | Partial once paused, final once complete; **never blocks.** |
+| `list_jobs` | Your most recent jobs. |
+| `pause_job` | Stop collecting (and spending). |
 
-Both create tools run on the **global audience** (no targeting) and take the same core parameters: the **question** (`instruction`), the **images as URLs** (`datapoint_urls` / `comparison_pairs`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**.
+Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as URLs: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_urls` for classification — where it is **optional**: omit it and the crowd answers the instruction on its own against a generic placeholder image.
 
-| `run_task` | Start collecting responses — **the single step that spends.** |
-| `get_task_status` | Current status of a task. |
-| `get_task_results` | Partial while running, final once complete; **never blocks.** |
-| `list_tasks` | Your most recent tasks. |
-| `pause_task` | Stop collecting (and spending). |
+Two invariants hold across the tool layer:
 
-Two invariants carry over from the task layer:
-
-- **Spending is explicit.** Creating a task never spends. `create_*` returns `total_responses`
-  (datapoints × responses_per_datapoint) as the honest cost driver; `run_task` is the only step
-  that spends. An agent should confirm the cost and review the `details_url` before calling it.
-- **Results never block.** `get_task_results` returns the partial snapshot while a task is still
-  processing, the final results once complete, and a pollable `result_status` (`not_started`,
-  `in_review`, …) otherwise. Per-annotator detail is dropped unless `include_details=true`, and the
-  datapoint list is capped (`max_datapoints`).
+- **Spending is explicit.** Creating a task never spends. `create_*` returns a draft with
+  `confirmation_required` and `total_responses` (datapoints × responses_per_datapoint) as the honest
+  cost driver; `start_job` is the only step that spends. The create response instructs the agent to
+  confirm the cost with the user and review the `details_url` before starting.
+- **Results never block.** `get_job_results` returns the final results once complete, the partial
+  snapshot if the job is paused, and a pollable `result_status` (`not_started`, `collecting`,
+  `manual_review`, …) while it is still processing. Per-annotator detail is dropped unless
+  `include_details=true`, and the datapoint list is capped (`max_datapoints`).
 
 ## Authentication
 
@@ -57,7 +59,7 @@ Fetching that metadata document returns:
 {
   "resource": "https://mcp.rapidata.ai",
   "authorization_servers": ["https://auth.rapidata.ai"],
-  "scopes_supported": ["openid", "profile", "email", "roles", "offline_access"],
+  "scopes_supported": ["openid", "profile", "email", "roles", "offline_access", "mcp"],
   "bearer_methods_supported": ["header"]
 }
 ```
@@ -84,9 +86,10 @@ POST https://auth.rapidata.ai/client/register
 
 Run the standard authorization-code flow with PKCE:
 
-- **Scopes:** request `openid email roles offline_access`.
+- **Scopes:** request `openid email roles offline_access mcp`.
   (`offline_access` yields a refresh token so the client can stay connected without re-prompting;
-  `roles` and `email` identify the customer.)
+  `roles` and `email` identify the customer; `mcp` carries the MCP server as an OAuth resource so
+  the authorization server accepts the RFC 8707 resource indicator the client sends for this server.)
 - One-time browser consent, then the client exchanges the code (with its PKCE verifier) for an
   access token and a refresh token.
 
