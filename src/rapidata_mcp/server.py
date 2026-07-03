@@ -32,6 +32,7 @@ from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
@@ -277,14 +278,36 @@ def build_app(settings: Settings | None = None) -> Starlette:
         Route("/", landing, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
         Route(_METADATA_PATH, protected_resource_metadata, methods=["GET"]),
+        # RFC 9728 also lets clients build the metadata URL by inserting the
+        # resource's path after /.well-known/, so serve that form too (otherwise
+        # a spec-compliant client requesting /.well-known/...-resource/mcp 404s).
+        Route(
+            f"{_METADATA_PATH}{_MCP_PATH}",
+            protected_resource_metadata,
+            methods=["GET"],
+        ),
     ]
-    middleware: list[Middleware] = []
+
+    # CORS must be outermost so it answers browser preflights (OPTIONS) before the
+    # auth layer can reject them, and so browser-based MCP clients can read the
+    # metadata and the WWW-Authenticate discovery hint cross-origin. Auth is via
+    # the Authorization header (not cookies), so wildcard origins are safe.
+    middleware: list[Middleware] = [
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["WWW-Authenticate", "Mcp-Session-Id"],
+            max_age=600,
+        )
+    ]
 
     if settings.auth_disabled:
         mcp_endpoint = streamable_asgi
     else:
         verifier = JWTVerifier(settings.issuer_url)
-        middleware = [
+        middleware += [
             Middleware(
                 AuthenticationMiddleware, backend=BearerAuthBackend(verifier)
             ),
