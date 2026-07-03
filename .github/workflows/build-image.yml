@@ -1,0 +1,91 @@
+name: Build and push image
+
+# Builds + pushes the container image on merge to main, then triggers a prod
+# deploy by bumping the image tag in the infrastructure repo (ArgoCD auto-syncs).
+# The infra `update-images.yml` workflow already handles the `rapidata-mcp` type.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  REGION: europe-west4
+  GAR_LOCATION: europe-west4-docker.pkg.dev/${{ secrets.GCP_COMMON_PROJECT_ID }}/rapidata-internal
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tag
+        id: tag
+        run: echo "value=sha-$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.tag.outputs.value }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Auto-deploy: point the prod overlay at the image just built, so ArgoCD
+      # (automated sync on services/rapidata-mcp) rolls the deployment. Mirrors the
+      # backend's deploy flow (repository_dispatch -> infrastructure update-images.yml,
+      # which already handles the `rapidata-mcp` type). The image must exist first, so
+      # this runs after the push.
+      - name: Create infrastructure app token
+        if: github.ref == 'refs/heads/main'
+        uses: actions/create-github-app-token@v3
+        id: infra-token
+        with:
+          app-id: ${{ vars.ARGOCD_APP_ID }}
+          private-key: ${{ secrets.ARGOCD_APP_PRIVATE_KEY }}
+          owner: RapidataAI
+          repositories: infrastructure
+
+      - name: Deploy — bump prod image tag
+        if: github.ref == 'refs/heads/main'
+        uses: octokit/request-action@v3.0.0
+        with:
+          route: POST /repos/{owner}/{repo}/dispatches
+          owner: RapidataAI
+          repo: infrastructure
+          event_type: update-image-tags
+          client_payload: '{"tag": "${{ steps.tag.outputs.value }}", "type": "rapidata-mcp", "overlay": "prod"}'
+        env:
+          GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}
