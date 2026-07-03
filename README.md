@@ -85,7 +85,7 @@ Fetching that metadata document returns:
 {
   "resource": "https://mcp.rapidata.ai",
   "authorization_servers": ["https://auth.rapidata.ai"],
-  "scopes_supported": ["openid", "profile", "email", "roles", "offline_access", "mcp"],
+  "scopes_supported": ["openid", "profile", "email", "roles", "offline_access", "mcp", "api"],
   "bearer_methods_supported": ["header"]
 }
 ```
@@ -112,10 +112,12 @@ POST https://auth.rapidata.ai/client/register
 
 Run the standard authorization-code flow with PKCE:
 
-- **Scopes:** request `openid email roles offline_access mcp`.
+- **Scopes:** request `openid email roles offline_access mcp api`.
   (`offline_access` yields a refresh token so the client can stay connected without re-prompting;
   `roles` and `email` identify the customer; `mcp` carries the MCP server as an OAuth resource so
-  the authorization server accepts the RFC 8707 resource indicator the client sends for this server.)
+  the authorization server accepts the RFC 8707 resource indicator the client sends for this server;
+  `api` carries the backend API as a resource so the forwarded token stays valid at the API once it
+  enforces audiences.)
 - One-time browser consent, then the client exchanges the code (with its PKCE verifier) for an
   access token and a refresh token.
 
