@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from rapidata_mcp.auth import ClientProvider
 from rapidata_mcp.results import summarize_results
@@ -61,6 +62,11 @@ _PENDING_STATES: dict[str, str] = {
 }
 # States from which a (partial or final) result file can be downloaded.
 _FINISHED_STATES = {"Completed", "Paused"}
+
+# Every tool reaches the Rapidata platform (an external service), the global
+# crowd of human annotators, and caller-supplied public media URLs — an open
+# world of external entities, so openWorldHint is true throughout.
+_OPEN_WORLD = True
 
 
 def register_tools(
@@ -123,16 +129,52 @@ def register_tools(
             # Creates a reversible draft job definition; no spend, nothing destroyed.
             readOnlyHint=False,
             destructiveHint=False,
+            openWorldHint=_OPEN_WORLD,
         ),
     )
     def create_classification_task(
-        name: str,
-        instruction: str,
-        answer_options: list[str],
-        datapoint_urls: list[str] | None = None,
-        responses_per_datapoint: int = 10,
-        contexts: list[str] | None = None,
-        confidence_threshold: float | None = None,
+        name: Annotated[
+            str,
+            Field(description="Internal label for the task; not shown to annotators."),
+        ],
+        instruction: Annotated[
+            str, Field(description="The question annotators answer for each item.")
+        ],
+        answer_options: Annotated[
+            list[str],
+            Field(description="The options annotators choose from (at least two)."),
+        ],
+        datapoint_urls: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "One publicly reachable URL per item to label "
+                    "(image/video/audio). Optional — omit it to ask the instruction "
+                    "on its own against a generic placeholder image."
+                )
+            ),
+        ] = None,
+        responses_per_datapoint: Annotated[
+            int, Field(description="Number of human responses to collect per item.")
+        ] = 10,
+        contexts: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Optional per-datapoint text shown alongside the instruction. "
+                    "If given, must have one entry per datapoint."
+                )
+            ),
+        ] = None,
+        confidence_threshold: Annotated[
+            float | None,
+            Field(
+                description=(
+                    "Optional early-stop: stop a datapoint once this confidence is "
+                    "reached or the response cap is hit."
+                )
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         """Create a classification task where humans pick one answer option per item.
 
@@ -140,21 +182,6 @@ def register_tools(
         spend): it returns ``confirmation_required`` and expects you to confirm the
         cost with the user, then call ``start_job``. When run, the task goes to the
         global audience (no targeting).
-
-        Args:
-            name: Internal label for the task (not shown to annotators).
-            instruction: The question annotators answer.
-            answer_options: The options annotators choose from (at least two).
-            datapoint_urls: One publicly reachable URL per item to be labeled
-                (image/video/audio). Optional — omit it to ask the instruction on
-                its own, and a generic placeholder image stands in as the single
-                datapoint.
-            responses_per_datapoint: Human responses collected per item.
-            contexts: Optional per-datapoint text context, shown alongside the
-                instruction. If given, must have one entry per datapoint (same
-                length as the resolved datapoints).
-            confidence_threshold: Optional early-stop; stops a datapoint once
-                this confidence is reached or the response cap is hit.
         """
         if len(answer_options) < 2:
             raise ValueError("answer_options must contain at least two options")
@@ -183,15 +210,42 @@ def register_tools(
             title="Create comparison task",
             readOnlyHint=False,
             destructiveHint=False,
+            openWorldHint=_OPEN_WORLD,
         ),
     )
     def create_comparison_task(
-        name: str,
-        instruction: str,
-        comparison_pairs: list[list[str]],
-        responses_per_datapoint: int = 10,
-        contexts: list[str] | None = None,
-        confidence_threshold: float | None = None,
+        name: Annotated[
+            str,
+            Field(description="Internal label for the task; not shown to annotators."),
+        ],
+        instruction: Annotated[
+            str, Field(description="The question annotators answer for each pair.")
+        ],
+        comparison_pairs: Annotated[
+            list[list[str]],
+            Field(
+                description=(
+                    "List of [item_a_url, item_b_url] pairs; each pair holds exactly "
+                    "two publicly reachable URLs."
+                )
+            ),
+        ],
+        responses_per_datapoint: Annotated[
+            int, Field(description="Number of human responses to collect per pair.")
+        ] = 10,
+        contexts: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Optional per-pair text shown alongside the instruction. If "
+                    "given, must have one entry per pair."
+                )
+            ),
+        ] = None,
+        confidence_threshold: Annotated[
+            float | None,
+            Field(description="Optional early-stop per pair once confident enough."),
+        ] = None,
     ) -> dict[str, Any]:
         """Create a pairwise comparison task: humans choose between two items each.
 
@@ -201,16 +255,6 @@ def register_tools(
         ``start_job``. Each pair must hold exactly two publicly reachable URLs, so
         (unlike classification) the media is required. When run, it goes to the
         global audience.
-
-        Args:
-            name: Internal label for the task (not shown to annotators).
-            instruction: The question annotators answer for each pair.
-            comparison_pairs: List of [item_a_url, item_b_url] pairs.
-            responses_per_datapoint: Human responses collected per pair.
-            contexts: Optional per-pair text context, shown alongside the
-                instruction. If given, must have one entry per pair (same length
-                as comparison_pairs).
-            confidence_threshold: Optional early-stop per pair.
         """
         if not comparison_pairs:
             raise ValueError("comparison_pairs must not be empty")
@@ -244,17 +288,24 @@ def register_tools(
             readOnlyHint=False,
             destructiveHint=True,
             idempotentHint=False,
+            openWorldHint=_OPEN_WORLD,
         ),
     )
-    def start_job(job_definition_id: str) -> dict[str, Any]:
+    def start_job(
+        job_definition_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "The draft job definition id returned by a create_*_task tool."
+                )
+            ),
+        ],
+    ) -> dict[str, Any]:
         """Start a draft job definition on the global audience. This step spends.
 
         Runs the job definition created by ``create_*_task`` against the global
         audience, which begins collecting responses and spending. Only call this
         after confirming the task's cost (``total_responses``) with the user.
-
-        Args:
-            job_definition_id: The draft returned by a create_*_task tool.
         """
         audience = _client().audience.get_audience_by_id(_GLOBAL_AUDIENCE_ID)
         job = audience.assign_job(_definition(job_definition_id))
@@ -268,9 +319,18 @@ def register_tools(
 
     @mcp.tool(
         title="Get job status",
-        annotations=ToolAnnotations(title="Get job status", readOnlyHint=True),
+        annotations=ToolAnnotations(
+            title="Get job status",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=_OPEN_WORLD,
+        ),
     )
-    def get_job_status(job_id: str) -> dict[str, Any]:
+    def get_job_status(
+        job_id: Annotated[
+            str, Field(description="The job id returned by start_job.")
+        ],
+    ) -> dict[str, Any]:
         """Get the current status of a running job without fetching results."""
         job = _job(job_id)
         return {
@@ -281,12 +341,32 @@ def register_tools(
 
     @mcp.tool(
         title="Get job results",
-        annotations=ToolAnnotations(title="Get job results", readOnlyHint=True),
+        annotations=ToolAnnotations(
+            title="Get job results",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=_OPEN_WORLD,
+        ),
     )
     def get_job_results(
-        job_id: str,
-        include_details: bool = False,
-        max_datapoints: int = 50,
+        job_id: Annotated[
+            str, Field(description="The job id returned by start_job.")
+        ],
+        include_details: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include per-annotator detail (country, language, demographics, "
+                    "reliability score). Large; off by default."
+                )
+            ),
+        ] = False,
+        max_datapoints: Annotated[
+            int,
+            Field(
+                description="Maximum number of per-datapoint result entries to return."
+            ),
+        ] = 50,
     ) -> dict[str, Any]:
         """Fetch results for a job. Never blocks on a still-running job.
 
@@ -294,12 +374,6 @@ def register_tools(
         "complete"``; if it was paused, returns the partial snapshot collected so
         far. If it is still processing, returns a ``result_status`` to poll on
         (e.g. ``not_started``, ``collecting``, ``manual_review``) and no results.
-
-        Args:
-            job_id: The job to fetch (from start_job).
-            include_details: Include per-annotator detail (country, language,
-                demographics, reliability score). Large; off by default.
-            max_datapoints: Cap on per-datapoint entries returned.
         """
         job = _job(job_id)
         status = job.get_status()
@@ -343,9 +417,27 @@ def register_tools(
 
     @mcp.tool(
         title="List jobs",
-        annotations=ToolAnnotations(title="List jobs", readOnlyHint=True),
+        annotations=ToolAnnotations(
+            title="List jobs",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=_OPEN_WORLD,
+        ),
     )
-    def list_jobs(name_contains: str = "", limit: int = 10) -> dict[str, Any]:
+    def list_jobs(
+        name_contains: Annotated[
+            str,
+            Field(
+                description=(
+                    "Only return jobs whose name contains this text; empty "
+                    "returns all."
+                )
+            ),
+        ] = "",
+        limit: Annotated[
+            int, Field(description="Maximum number of jobs to return.")
+        ] = 10,
+    ) -> dict[str, Any]:
         """List your most recent jobs, newest first."""
         jobs = _client().job.find_jobs(name=name_contains, amount=limit)
         return {
@@ -368,9 +460,14 @@ def register_tools(
             readOnlyHint=False,
             destructiveHint=False,
             idempotentHint=True,
+            openWorldHint=_OPEN_WORLD,
         ),
     )
-    def pause_job(job_id: str) -> dict[str, Any]:
+    def pause_job(
+        job_id: Annotated[
+            str, Field(description="The job id to pause.")
+        ],
+    ) -> dict[str, Any]:
         """Pause a running job to stop collecting further responses (and spending)."""
         job = _job(job_id)
         # The SDK's RapidataJob has no public pause wrapper yet, so call the job API.
