@@ -48,7 +48,18 @@ _MCP_PATH = "/mcp"
 # "mcp" is the scope that carries https://mcp.rapidata.ai as an OAuth resource on
 # the auth server; clients must request it so the auth server accepts the RFC 8707
 # resource indicator they send for this server (otherwise: invalid_target).
-_DEFAULT_SCOPES = ["openid", "profile", "email", "roles", "offline_access", "mcp"]
+# "api" additionally carries the backend API (https://api.rapidata.ai) as a resource,
+# so the token this server forwards to the Rapidata API stays valid once the API
+# enforces token audiences. It's harmless until then (audience is not yet enforced).
+_DEFAULT_SCOPES = [
+    "openid",
+    "profile",
+    "email",
+    "roles",
+    "offline_access",
+    "mcp",
+    "api",
+]
 
 # Surfaced to the connecting agent via the MCP initialize response so it knows,
 # up front, that these tools are only a slice of Rapidata and where to go for more.
