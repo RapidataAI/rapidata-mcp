@@ -1,0 +1,40 @@
+name: Deploy
+
+# This repository is public, so it holds no cloud credentials. The image build
+# and deploy (which need GCP + Artifact Registry access) run in the private
+# `infrastructure` repo. On push to main we only dispatch a build request there,
+# passing the commit to build. The only credential here is a GitHub App token
+# scoped to `infrastructure` — enough to trigger a build of already-public code,
+# nothing more. Not reachable from fork PRs (this runs only on push to main).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  trigger-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute image tag
+        id: tag
+        run: echo "value=sha-$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint infrastructure app token
+        uses: actions/create-github-app-token@v3
+        id: infra-token
+        with:
+          app-id: ${{ vars.ARGOCD_APP_ID }}
+          private-key: ${{ secrets.ARGOCD_APP_PRIVATE_KEY }}
+          owner: RapidataAI
+          repositories: infrastructure
+
+      - name: Dispatch build + deploy to infrastructure
+        uses: octokit/request-action@v3.0.0
+        with:
+          route: POST /repos/{owner}/{repo}/dispatches
+          owner: RapidataAI
+          repo: infrastructure
+          event_type: build-mcp-image
+          client_payload: '{"sha": "${{ github.sha }}", "tag": "${{ steps.tag.outputs.value }}", "overlay": "prod"}'
+        env:
+          GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}
