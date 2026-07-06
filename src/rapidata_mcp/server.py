@@ -269,8 +269,14 @@ def build_app(settings: Settings | None = None) -> Starlette:
     )
     streamable_asgi = StreamableHTTPASGIApp(session_manager)
 
+    # Advertise the canonical resource id, with the empty-path "/". A bare origin (no
+    # path) isn't a canonical absolute URI, and the auth server (OpenIddict) rejects it
+    # as an invalid resource indicator (invalid_target / ID2190). Clients that use this
+    # value verbatim (e.g. OpenAI) send exactly what we advertise, so the bare form
+    # breaks their sign-in; the trailing slash fixes it and is harmless for clients that
+    # normalize it themselves.
     metadata = {
-        "resource": settings.resource_url,
+        "resource": f"{settings.resource_url}/",
         "authorization_servers": [settings.issuer_url],
         "scopes_supported": settings.scopes_supported,
         "bearer_methods_supported": ["header"],
