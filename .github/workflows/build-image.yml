@@ -1,12 +1,24 @@
 name: Build and push image
 
-# Builds + pushes the container image on merge to main, then triggers a prod
-# deploy by bumping the image tag in the infrastructure repo (ArgoCD auto-syncs).
-# The infra `update-images.yml` workflow already handles the `rapidata-mcp` type.
+# Builds + pushes the container image on merge to main and on every stable rapidata
+# SDK release, then triggers a prod deploy by bumping the image tag in the
+# infrastructure repo (ArgoCD auto-syncs). The infra `update-images.yml` workflow
+# already handles the `rapidata-mcp` type.
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  # The SDK's release workflow fires this on every stable rapidata release, so the
+  # deployed server never drifts behind the SDK it wraps: the image resolves the SDK
+  # at build time, so without a rebuild it keeps serving whatever version was current
+  # when this repo last changed.
+  repository_dispatch:
+    types: [sdk-released]
+  workflow_dispatch:
+    inputs:
+      rapidata_version:
+        description: "rapidata SDK version to pin (blank = latest on PyPI)"
+        required: false
+        type: string
 
 env:
   REGION: europe-west4
@@ -40,9 +52,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Resolve rapidata SDK version
+        id: sdk
+        run: |
+          echo "version=${{ github.event.client_payload.sdk_version || inputs.rapidata_version }}" >> "$GITHUB_OUTPUT"
+
       - name: Compute image tag
         id: tag
-        run: echo "value=sha-$(echo "${{ github.sha }}" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        env:
+          SDK_VERSION: ${{ steps.sdk.outputs.version }}
+        run: |
+          tag="sha-$(echo "${{ github.sha }}" | cut -c1-7)"
+          # An SDK-triggered rebuild runs on an unchanged commit, so the commit-only
+          # tag would collide with the existing image and leave ArgoCD nothing to sync.
+          if [ -n "$SDK_VERSION" ]; then
+            tag="$tag-sdk-$SDK_VERSION"
+          fi
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata
         id: meta
@@ -53,15 +79,29 @@ jobs:
             type=raw,value=latest
             type=raw,value=${{ steps.tag.outputs.value }}
 
-      - name: Build and push
+      - name: Build
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          load: true
+          build-args: |
+            RAPIDATA_VERSION=${{ steps.sdk.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # An SDK-triggered rebuild deploys with no PR and no CI run behind it, and the
+      # image resolves its dependencies at build time — so prove the server still
+      # imports and builds its app here, before anything reaches the registry.
+      - name: Smoke-test the image
+        run: |
+          docker run --rm --entrypoint python \
+            "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp:${{ steps.tag.outputs.value }}" \
+            -c 'import rapidata_mcp; rapidata_mcp.build_app(rapidata_mcp.Settings(auth_disabled=True))'
+
+      - name: Push
+        run: docker push --all-tags "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp"
 
       # Auto-deploy: point the prod overlay at the image just built, so ArgoCD
       # (automated sync on services/rapidata-mcp) rolls the deployment. Mirrors the

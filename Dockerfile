@@ -12,7 +12,11 @@ WORKDIR /app
 # Install dependencies first for better layer caching.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+# A rebuild triggered by a rapidata SDK release passes the just-published version
+# here. It both pins that exact version and busts this layer's cache, which would
+# otherwise reuse the SDK an earlier build resolved from the same source tree.
+ARG RAPIDATA_VERSION=""
+RUN pip install --no-cache-dir . ${RAPIDATA_VERSION:+rapidata==${RAPIDATA_VERSION}}
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 app

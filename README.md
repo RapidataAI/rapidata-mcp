@@ -201,6 +201,11 @@ docker run -p 8000:8000 \
   rapidata-mcp
 ```
 
+The build resolves the `rapidata` SDK from PyPI, so the version baked into an image is
+whichever was current when it was built. `--build-arg RAPIDATA_VERSION=3.19.2` pins an
+exact one instead; the SDK's release workflow passes it to rebuild this image on every
+stable SDK release, so the deployed server keeps tracking the SDK it wraps.
+
 ## Architecture
 
 ```

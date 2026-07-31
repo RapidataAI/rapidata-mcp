@@ -6,8 +6,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "mcp>=1.28.0",
-    "rapidata>=3.15.0",
+    # Upper-bounded on purpose: the image resolves dependencies at build time, and a
+    # rebuild is now triggered by SDK releases rather than by a change here, so an
+    # unbounded major bump would deploy untested. mcp 2.x drops
+    # `mcp.server.fastmcp`, which server.py is built on — moving to it is its own change.
+    "mcp>=1.28.0,<2",
+    "rapidata>=3.19.2",
     "PyJWT[crypto]>=2.8.0",
     "httpx>=0.28.0",
     "starlette>=0.40.0",
