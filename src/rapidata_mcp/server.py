@@ -168,6 +168,69 @@ class _BrowserLandingApp:
         await self._app(scope, receive, send)
 
 
+class _ClientErrorLoggingApp:
+    """Logs request details when the transport answers 4xx.
+
+    Production sees a steady rate of 400s on POST /mcp whose cause the access
+    log can't show; this captures the offending request (key MCP headers and a
+    bounded body prefix) so they can be diagnosed. Sits inside the auth layer,
+    so expected 401s never reach it.
+    """
+
+    def __init__(self, app, max_body: int = 2048) -> None:
+        self._app = app
+        self._max_body = max_body
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        body_parts: list[bytes] = []
+        status: list[int] = []
+
+        async def recording_receive():
+            message = await receive()
+            if message.get("type") == "http.request":
+                chunk = message.get("body", b"")
+                if chunk and sum(len(p) for p in body_parts) < self._max_body:
+                    body_parts.append(chunk[: self._max_body])
+            return message
+
+        async def recording_send(message) -> None:
+            if message["type"] == "http.response.start":
+                status.append(message["status"])
+            await send(message)
+
+        await self._app(scope, recording_receive, recording_send)
+
+        if status and 400 <= status[0] < 500:
+            headers = {
+                key.decode("latin-1"): value.decode("latin-1")
+                for key, value in scope.get("headers", [])
+            }
+            relevant = {
+                name: headers[name]
+                for name in (
+                    "content-type",
+                    "accept",
+                    "mcp-session-id",
+                    "mcp-protocol-version",
+                    "user-agent",
+                )
+                if name in headers
+            }
+            body = b"".join(body_parts)[: self._max_body]
+            logger.warning(
+                "Client error %d on %s %s; headers=%s body=%r",
+                status[0],
+                scope.get("method"),
+                scope.get("path"),
+                relevant,
+                body,
+            )
+
+
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -257,17 +320,19 @@ def build_app(settings: Settings | None = None) -> Starlette:
         "rapidata",
         instructions=_INSTRUCTIONS,
         stateless_http=True,
-        json_response=False,
+        json_response=True,
     )
     register_tools(mcp, provider_factory)
 
     # Build the Streamable-HTTP transport directly so the OAuth shell below is
     # fully under our control (FastMCP couples advertised scopes to enforced
-    # scopes, which we don't want).
+    # scopes, which we don't want). json_response=True: stateless mode never
+    # pushes server-initiated messages, and SSE responses get cut by LB/proxy
+    # stream timeouts that plain JSON is immune to.
     session_manager = StreamableHTTPSessionManager(
-        app=mcp._mcp_server, json_response=False, stateless=True
+        app=mcp._mcp_server, json_response=True, stateless=True
     )
-    streamable_asgi = StreamableHTTPASGIApp(session_manager)
+    streamable_asgi = _ClientErrorLoggingApp(StreamableHTTPASGIApp(session_manager))
 
     # Advertise the canonical resource id, with the empty-path "/". A bare origin (no
     # path) isn't a canonical absolute URI, and the auth server (OpenIddict) rejects it
