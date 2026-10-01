@@ -77,7 +77,7 @@ _INSTRUCTIONS = (
     "The easiest way is to install the official Rapidata skill, which teaches the "
     "agent to write Rapidata SDK code: in Claude Code run "
     "`/install-plugin https://github.com/RapidataAI/skills`; for other agents see "
-    "https://docs.rapidata.ai/latest/ai_agents/ . SDK docs: https://docs.rapidata.ai/"
+    "https://docs.rapidata.ai/ai_agents/ . SDK docs: https://docs.rapidata.ai/"
 )
 
 
@@ -134,7 +134,7 @@ _OVERVIEW_HTML = """<!doctype html>
   <ul>
     <li><a href="https://docs.rapidata.ai/">Rapidata documentation</a></li>
     <li>
-      <a href="https://docs.rapidata.ai/latest/ai_agents/">Use the full
+      <a href="https://docs.rapidata.ai/ai_agents/">Use the full
       Rapidata SDK from an agent</a>
     </li>
     <li><a href="https://www.rapidata.ai">rapidata.ai</a></li>
