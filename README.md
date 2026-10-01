@@ -61,7 +61,7 @@ To let an agent drive the full SDK directly (no manual coding), install the offi
 ```
 
 For other agents (Cursor, Windsurf, Copilot, …) and details, see the
-[AI agents guide](https://docs.rapidata.ai/latest/ai_agents/).
+[AI agents guide](https://docs.rapidata.ai/ai_agents/).
 
 ## Authentication
 
