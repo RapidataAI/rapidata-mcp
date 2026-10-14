@@ -84,7 +84,7 @@ Fetching that metadata document returns:
 ```json
 {
   "resource": "https://mcp.rapidata.ai",
-  "authorization_servers": ["https://auth.rapidata.ai"],
+  "authorization_servers": ["https://auth.rapidata.ai/"],
   "scopes_supported": ["openid", "profile", "email", "roles", "offline_access", "mcp", "api"],
   "bearer_methods_supported": ["header"]
 }

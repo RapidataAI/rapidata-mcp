@@ -339,10 +339,11 @@ def build_app(settings: Settings | None = None) -> Starlette:
     # as an invalid resource indicator (invalid_target / ID2190). Clients that use this
     # value verbatim (e.g. OpenAI) send exactly what we advertise, so the bare form
     # breaks their sign-in; the trailing slash fixes it and is harmless for clients that
-    # normalize it themselves.
+    # normalize it themselves. The auth server must match the RFC 8414 ``issuer``
+    # byte-for-byte, and OpenIddict publishes it with a trailing slash.
     metadata = {
         "resource": f"{settings.resource_url}/",
-        "authorization_servers": [settings.issuer_url],
+        "authorization_servers": [f"{settings.issuer_url.rstrip('/')}/"],
         "scopes_supported": settings.scopes_supported,
         "bearer_methods_supported": ["header"],
     }
