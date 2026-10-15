@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from mcp.types import ToolAnnotations
 from pydantic import Field
+from typing_extensions import TypedDict
 
 from rapidata_mcp.auth import ClientProvider
 from rapidata_mcp.results import summarize_results
@@ -69,6 +70,66 @@ _FINISHED_STATES = {"Completed", "Paused"}
 _OPEN_WORLD = True
 
 
+class DraftResult(TypedDict):
+    job_definition_id: str
+    name: str
+    status: str
+    details_url: str
+    runs_on: str
+    total_responses: int
+    confirmation_required: bool
+    next_step: str
+
+
+class StartedJob(TypedDict):
+    job_id: str
+    name: str
+    status: str
+    details_url: str
+    started: bool
+
+
+class JobStatus(TypedDict):
+    job_id: str
+    status: str
+    details_url: str
+
+
+class _JobResultsBase(TypedDict):
+    job_id: str
+    status: str
+    result_status: str
+    results: list[dict[str, Any]] | None
+
+
+# FastMCP serialises absent keys as null, so every optional field must allow it.
+class JobResults(_JobResultsBase, total=False):
+    error: str | None
+    detail: str | None
+    info: dict[str, Any] | None
+    summary: dict[str, Any] | None
+    datapoint_count: int | None
+    returned_datapoints: int | None
+    truncated: bool | None
+
+
+class JobSummary(TypedDict):
+    job_id: str
+    name: str
+    status: str
+    details_url: str
+
+
+class JobList(TypedDict):
+    jobs: list[JobSummary]
+
+
+class PausedJob(TypedDict):
+    job_id: str
+    status: str
+    paused: bool
+
+
 def register_tools(
     mcp: FastMCP, provider_factory: Callable[[], ClientProvider]
 ) -> None:
@@ -103,7 +164,7 @@ def register_tools(
 
     def _draft_result(
         definition: RapidataJobDefinition, total_responses: int
-    ) -> dict[str, Any]:
+    ) -> DraftResult:
         return {
             "job_definition_id": definition.id,
             "name": definition.name,
@@ -127,8 +188,10 @@ def register_tools(
         annotations=ToolAnnotations(
             title="Create classification task",
             # Creates a reversible draft job definition; no spend, nothing destroyed.
+            # Each call creates a new definition, so repeats are not idempotent.
             readOnlyHint=False,
             destructiveHint=False,
+            idempotentHint=False,
             openWorldHint=_OPEN_WORLD,
         ),
     )
@@ -142,7 +205,13 @@ def register_tools(
         ],
         answer_options: Annotated[
             list[str],
-            Field(description="The options annotators choose from (at least two)."),
+            Field(
+                min_length=2,
+                description=(
+                    "The answers annotators pick between, shown verbatim; results "
+                    "are tallied per option text."
+                ),
+            ),
         ],
         datapoint_urls: Annotated[
             list[str] | None,
@@ -170,12 +239,16 @@ def register_tools(
             float | None,
             Field(
                 description=(
-                    "Optional early-stop: stop a datapoint once this confidence is "
-                    "reached or the response cap is hit."
+                    "Optional early stop, as a probability strictly between 0 and 1: "
+                    "stop collecting for a datapoint once the leading answer is this "
+                    "likely to be the crowd's true choice, or when "
+                    "responses_per_datapoint is reached. Scales logarithmically "
+                    "(0.99 to 0.999 is a big step). Omit to always collect "
+                    "responses_per_datapoint."
                 )
             ),
         ] = None,
-    ) -> dict[str, Any]:
+    ) -> DraftResult:
         """Create a classification task where humans pick one answer option per item.
 
         Creates a DRAFT job definition and does NOT start collecting responses (or
@@ -183,9 +256,6 @@ def register_tools(
         cost with the user, then call ``start_job``. When run, the task goes to the
         global audience (no targeting).
         """
-        if len(answer_options) < 2:
-            raise ValueError("answer_options must contain at least two options")
-
         datapoints = datapoint_urls if datapoint_urls else [_PLACEHOLDER_IMAGE_URL]
         if contexts is not None and len(contexts) != len(datapoints):
             raise ValueError(
@@ -210,6 +280,7 @@ def register_tools(
             title="Create comparison task",
             readOnlyHint=False,
             destructiveHint=False,
+            idempotentHint=False,
             openWorldHint=_OPEN_WORLD,
         ),
     )
@@ -244,9 +315,18 @@ def register_tools(
         ] = None,
         confidence_threshold: Annotated[
             float | None,
-            Field(description="Optional early-stop per pair once confident enough."),
+            Field(
+                description=(
+                    "Optional early stop, as a probability strictly between 0 and "
+                    "1: stop collecting for a pair once the leading item is this "
+                    "likely to be the crowd's true preference, or when "
+                    "responses_per_datapoint is reached. Scales logarithmically "
+                    "(0.99 to 0.999 is a big step). Omit to always collect "
+                    "responses_per_datapoint."
+                )
+            ),
         ] = None,
-    ) -> dict[str, Any]:
+    ) -> DraftResult:
         """Create a pairwise comparison task: humans choose between two items each.
 
         Useful for evaluating or ranking outputs (e.g. which of two images better
@@ -280,9 +360,9 @@ def register_tools(
         )
 
     @mcp.tool(
-        title="Start job (spends)",
+        title="Start job",
         annotations=ToolAnnotations(
-            title="Start job (spends)",
+            title="Start job",
             # Runs the job on the global audience: begins collecting and spending,
             # which is not reversible — flag it as the one destructive action.
             readOnlyHint=False,
@@ -300,7 +380,7 @@ def register_tools(
                 )
             ),
         ],
-    ) -> dict[str, Any]:
+    ) -> StartedJob:
         """Start a draft job definition on the global audience. This step spends.
 
         Runs the job definition created by ``create_*_task`` against the global
@@ -323,6 +403,7 @@ def register_tools(
             title="Get job status",
             readOnlyHint=True,
             destructiveHint=False,
+            idempotentHint=True,
             openWorldHint=_OPEN_WORLD,
         ),
     )
@@ -330,8 +411,14 @@ def register_tools(
         job_id: Annotated[
             str, Field(description="The job id returned by start_job.")
         ],
-    ) -> dict[str, Any]:
-        """Get the current status of a running job without fetching results."""
+    ) -> JobStatus:
+        """Get a job's current platform state without fetching results.
+
+        Returns ``job_id``, ``status`` (the platform state, e.g. ``Submitted``,
+        ``Running``, ``ManualApproval``, ``Completed``, ``Paused``, ``Failed``) and
+        ``details_url``, the job's page in the Rapidata dashboard. It carries no
+        progress percentage or responses; use ``get_job_results`` for those.
+        """
         job = _job(job_id)
         return {
             "job_id": job.id,
@@ -345,6 +432,7 @@ def register_tools(
             title="Get job results",
             readOnlyHint=True,
             destructiveHint=False,
+            idempotentHint=True,
             openWorldHint=_OPEN_WORLD,
         ),
     )
@@ -367,7 +455,7 @@ def register_tools(
                 description="Maximum number of per-datapoint result entries to return."
             ),
         ] = 50,
-    ) -> dict[str, Any]:
+    ) -> JobResults:
         """Fetch results for a job. Never blocks on a still-running job.
 
         If the job has finished, returns the final results with ``result_status:
@@ -408,11 +496,17 @@ def register_tools(
                 "results": None,
             }
 
+        summary = summarize_results(results, include_details, max_datapoints)
         return {
             "job_id": job.id,
             "status": status,
             "result_status": "complete" if status == "Completed" else "partial",
-            **summarize_results(results, include_details, max_datapoints),
+            "results": summary["results"],
+            "info": summary["info"],
+            "summary": summary["summary"],
+            "datapoint_count": summary["datapoint_count"],
+            "returned_datapoints": summary["returned_datapoints"],
+            "truncated": summary["truncated"],
         }
 
     @mcp.tool(
@@ -421,6 +515,7 @@ def register_tools(
             title="List jobs",
             readOnlyHint=True,
             destructiveHint=False,
+            idempotentHint=True,
             openWorldHint=_OPEN_WORLD,
         ),
     )
@@ -437,7 +532,7 @@ def register_tools(
         limit: Annotated[
             int, Field(description="Maximum number of jobs to return.")
         ] = 10,
-    ) -> dict[str, Any]:
+    ) -> JobList:
         """List your most recent jobs, newest first."""
         jobs = _client().job.find_jobs(name=name_contains, amount=limit)
         return {
@@ -465,9 +560,15 @@ def register_tools(
     )
     def pause_job(
         job_id: Annotated[
-            str, Field(description="The job id to pause.")
+            str,
+            Field(
+                description=(
+                    "The job_id returned by start_job or list_jobs (not a "
+                    "job_definition_id)."
+                )
+            ),
         ],
-    ) -> dict[str, Any]:
+    ) -> PausedJob:
         """Pause a running job to stop collecting further responses (and spending)."""
         job = _job(job_id)
         # The SDK's RapidataJob has no public pause wrapper yet, so call the job API.

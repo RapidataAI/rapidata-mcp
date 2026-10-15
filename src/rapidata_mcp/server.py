@@ -28,6 +28,7 @@ from mcp.server.auth.middleware.bearer_auth import (
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import StreamableHTTPASGIApp
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.types import Icon
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -319,6 +320,14 @@ def build_app(settings: Settings | None = None) -> Starlette:
     mcp = FastMCP(
         "rapidata",
         instructions=_INSTRUCTIONS,
+        website_url="https://docs.rapidata.ai/",
+        icons=[
+            Icon(
+                src="https://docs.rapidata.ai/media/rapidata.svg",
+                mimeType="image/svg+xml",
+                sizes=["any"],
+            )
+        ],
         stateless_http=True,
         json_response=True,
     )
