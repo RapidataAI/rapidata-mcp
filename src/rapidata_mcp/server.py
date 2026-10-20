@@ -115,11 +115,11 @@ _OVERVIEW_HTML = """<!doctype html>
   <p class="sub">Real human feedback and labeling for your AI agent.</p>
   <p>This is the
      <a href="https://modelcontextprotocol.io">Model Context Protocol</a>
-     endpoint for <a href="https://www.rapidata.ai">Rapidata</a>. It's a machine
-     endpoint meant to be added to an MCP-capable client (Claude, Cursor, and
-     others) — not browsed directly. Point your client at it and it can create
-     classification and comparison tasks, run them on a global crowd of humans,
-     and read the results.</p>
+     endpoint for <a href="https://rapidata.ai/?utm_source=mcp&amp;utm_medium=referral&amp;utm_campaign=mcp_landing&amp;utm_content=landing">Rapidata</a>.
+     It's a machine endpoint meant to be added to an MCP-capable client (Claude,
+     Cursor, and others) — not browsed directly. Point your client at it and it
+     can create classification and comparison tasks, run them on a global crowd
+     of humans, and read the results.</p>
   <div class="card">
     <strong>Connect</strong>
     <p style="margin:.5rem 0 0">
@@ -133,12 +133,15 @@ _OVERVIEW_HTML = """<!doctype html>
   </div>
   <p>Learn more:</p>
   <ul>
-    <li><a href="https://docs.rapidata.ai/">Rapidata documentation</a></li>
     <li>
-      <a href="https://docs.rapidata.ai/ai_agents/">Use the full
-      Rapidata SDK from an agent</a>
+      <a href="https://docs.rapidata.ai/?utm_source=mcp&amp;utm_medium=referral&amp;utm_campaign=mcp_landing&amp;utm_content=landing">Rapidata
+      documentation</a>
     </li>
-    <li><a href="https://www.rapidata.ai">rapidata.ai</a></li>
+    <li>
+      <a href="https://docs.rapidata.ai/ai_agents/?utm_source=mcp&amp;utm_medium=referral&amp;utm_campaign=mcp_landing&amp;utm_content=landing">Use
+      the full Rapidata SDK from an agent</a>
+    </li>
+    <li><a href="https://rapidata.ai/?utm_source=mcp&amp;utm_medium=referral&amp;utm_campaign=mcp_landing&amp;utm_content=landing">rapidata.ai</a></li>
   </ul>
 </body>
 </html>"""
