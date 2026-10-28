@@ -38,7 +38,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
-from rapidata_mcp.auth import ClientProvider, EnvClientProvider, TokenClientProvider
+from rapidata_mcp.auth import (
+    ClientProvider,
+    EnvClientProvider,
+    ExchangedTokenProvider,
+    TokenClientProvider,
+    TokenExchanger,
+)
 from rapidata_mcp.token_verifier import JWTVerifier
 from rapidata_mcp.tools import register_tools
 
@@ -49,9 +55,8 @@ _MCP_PATH = "/mcp"
 # "mcp" is the scope that carries https://mcp.rapidata.ai as an OAuth resource on
 # the auth server; clients must request it so the auth server accepts the RFC 8707
 # resource indicator they send for this server (otherwise: invalid_target).
-# "api" additionally carries the backend API (https://api.rapidata.ai) as a resource,
-# so the token this server forwards to the Rapidata API stays valid once the API
-# enforces token audiences. It's harmless until then (audience is not yet enforced).
+# "api" must stay: the auth server only exchanges the mcp token for api scopes the
+# user consented to in the same authorization.
 _DEFAULT_SCOPES = [
     "openid",
     "profile",
@@ -250,6 +255,9 @@ class Settings:
     port: int = 8000
     environment: str | None = None
     auth_disabled: bool = False
+    client_id: str = "rapidata-mcp-server"
+    client_secret: str | None = None
+    api_resource: str = "https://api.rapidata.ai"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -266,6 +274,11 @@ class Settings:
             port=int(os.environ.get("PORT", cls.port)),
             environment=os.environ.get("RAPIDATA_ENVIRONMENT") or None,
             auth_disabled=_env_flag("RAPIDATA_MCP_AUTH_DISABLED"),
+            client_id=os.environ.get("RAPIDATA_MCP_CLIENT_ID", cls.client_id),
+            client_secret=os.environ.get("RAPIDATA_MCP_CLIENT_SECRET") or None,
+            api_resource=os.environ.get(
+                "RAPIDATA_MCP_API_RESOURCE", cls.api_resource
+            ),
         )
 
 
@@ -277,14 +290,28 @@ def _silence_sdk_stdout() -> None:
     rapidata_config.logging.enable_otlp = False
 
 
-def _token_provider_factory(environment: str | None):
+def _token_provider_factory(settings: Settings):
     """Per-request factory: build a customer-scoped client from the bearer token.
 
     The token has already been verified by :class:`JWTVerifier`; here we read it
-    back off the request's auth context and hand the raw JWT to the SDK, which
-    forwards it to the gateway. The gateway scopes data access by the token's
-    customer, so no customer id needs threading through.
+    back off the request's auth context and exchange it for an api token, which
+    the SDK sends to the gateway. Without a client secret the mcp token is
+    forwarded as is.
     """
+    environment = settings.environment
+    exchanger: TokenExchanger | None = None
+    if settings.client_secret:
+        exchanger = TokenExchanger(
+            settings.issuer_url,
+            settings.client_id,
+            settings.client_secret,
+            settings.api_resource,
+        )
+    else:
+        logger.warning(
+            "RAPIDATA_MCP_CLIENT_SECRET is not set — forwarding the caller's mcp "
+            "token to the Rapidata API instead of exchanging it for an api token."
+        )
 
     def factory() -> ClientProvider:
         access = get_access_token()
@@ -292,6 +319,10 @@ def _token_provider_factory(environment: str | None):
             # RequireAuthMiddleware guarantees a token reaches the tools, so this
             # only fires if the wiring is wrong.
             raise RuntimeError("No authenticated access token in request context")
+        if exchanger is not None:
+            return ExchangedTokenProvider(
+                exchanger, access.token, environment=environment
+            )
         token = {
             "access_token": access.token,
             "token_type": "Bearer",
@@ -318,7 +349,7 @@ def build_app(settings: Settings | None = None) -> Starlette:
             return EnvClientProvider(environment=env)
 
     else:
-        provider_factory = _token_provider_factory(settings.environment)
+        provider_factory = _token_provider_factory(settings)
 
     mcp = FastMCP(
         "rapidata",
