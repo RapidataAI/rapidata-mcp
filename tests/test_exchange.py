@@ -127,18 +127,29 @@ def test_expiry_refreshes(exchanger, clock, api_clients):
     assert api_clients[-1]["token"]["expires_at"] == int(clock.now + 3600)
 
 
-@pytest.mark.parametrize("status", [400, 401])
+@pytest.mark.parametrize(
+    ("status", "error", "message"),
+    [
+        (400, "invalid_grant", "Re-authenticate"),
+        (400, "unauthorized_client", "server configuration problem"),
+        (400, "invalid_scope", "server configuration problem"),
+        (400, "invalid_target", "server configuration problem"),
+        (401, "invalid_client", "server configuration problem"),
+    ],
+)
 @respx.mock
-def test_refused_exchange_is_an_auth_error(exchanger, clock, api_clients, status):
+def test_refused_exchange_is_an_auth_error(
+    exchanger, clock, api_clients, status, error, message
+):
     respx.post(TOKEN_ENDPOINT).mock(
         return_value=httpx.Response(
-            status,
-            json={"error": "unauthorized_client", "error_description": "nope"},
+            status, json={"error": error, "error_description": "nope"}
         )
     )
 
-    with pytest.raises(TokenExchangeError, match="Not authorized.*nope"):
+    with pytest.raises(TokenExchangeError, match=f"Not authorized.*{error}: nope") as e:
         ExchangedTokenProvider(exchanger, MCP_TOKEN).get_client()
+    assert message in str(e.value)
     assert api_clients == []
 
 

@@ -141,10 +141,16 @@ class TokenExchanger:
             raise TokenExchangeError(f"Token exchange failed: {e}") from e
 
         if resp.status_code in (400, 401):
+            if _error_code(resp) == "invalid_grant":
+                raise TokenExchangeError(
+                    "Not authorized: your Rapidata sign-in is no longer valid "
+                    f"({_error_detail(resp)}). Re-authenticate with the Rapidata MCP "
+                    "server and retry."
+                )
             raise TokenExchangeError(
                 "Not authorized: the Rapidata authorization server refused to issue "
-                f"an API token for this session ({_error_detail(resp)}). Sign in to "
-                "the Rapidata MCP server again."
+                f"an API token for this MCP server ({_error_detail(resp)}). This is "
+                "a server configuration problem; signing in again will not help."
             )
         if resp.status_code != 200:
             raise TokenExchangeError(f"Token exchange failed ({_error_detail(resp)})")
@@ -157,14 +163,23 @@ class TokenExchanger:
         }
 
 
-def _error_detail(resp: httpx.Response) -> str:
+def _error_body(resp: httpx.Response) -> dict:
     try:
         body = resp.json()
-        detail = body.get("error_description") or body.get("error")
-    except (ValueError, AttributeError):
-        detail = None
-    status = f"HTTP {resp.status_code}"
-    return f"{status}: {detail}" if detail else status
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _error_code(resp: httpx.Response) -> str | None:
+    return _error_body(resp).get("error")
+
+
+def _error_detail(resp: httpx.Response) -> str:
+    body = _error_body(resp)
+    error, description = body.get("error"), body.get("error_description")
+    parts = [f"HTTP {resp.status_code}", error, description]
+    return ": ".join(p for p in parts if p)
 
 
 class ExchangedTokenProvider:
