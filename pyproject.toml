@@ -25,6 +25,8 @@ rapidata-mcp = "rapidata_mcp.server:main"
 [dependency-groups]
 dev = [
     "pyright>=1.1.390",
+    "pytest>=8.0",
+    "respx>=0.22.0",
     "ruff>=0.8.0",
 ]
 
@@ -42,6 +44,9 @@ typeCheckingMode = "basic"
 # The Rapidata SDK ships without type stubs; don't fail on its untyped surface.
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88

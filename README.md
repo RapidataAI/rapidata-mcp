@@ -159,6 +159,9 @@ prompt.
 | `RAPIDATA_MCP_RESOURCE_URL` | `https://mcp.rapidata.ai` | This server's public resource identifier. |
 | `RAPIDATA_MCP_ISSUER_URL` | `https://auth.rapidata.ai` | The authorization server (issuer). |
 | `RAPIDATA_MCP_SCOPES` | `openid profile email roles offline_access` | Advertised `scopes_supported`. |
+| `RAPIDATA_MCP_CLIENT_ID` | `rapidata-mcp-server` | OIDC client this server exchanges tokens as. |
+| `RAPIDATA_MCP_CLIENT_SECRET` | _(unset)_ | Its secret. When set, the caller's token is exchanged (RFC 8693) at `<issuer>/connect/token` for an API token; unset, the caller's token is forwarded. |
+| `RAPIDATA_MCP_API_RESOURCE` | `https://api.rapidata.ai` | API audience requested in the exchange (`https://api.rabbitdata.ch` on test). |
 | `RAPIDATA_ENVIRONMENT` | _(SDK default)_ | Rapidata SDK environment to target. |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address. |
 | `LOG_LEVEL` | `INFO` | Logging level. |
@@ -188,7 +191,8 @@ Type-check and lint:
 
 ```bash
 uv run pyright
-uv run ruff check src
+uv run ruff check src tests
+uv run pytest
 ```
 
 ## Docker

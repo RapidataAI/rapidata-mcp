@@ -4,8 +4,8 @@ Implements the MCP SDK's :class:`TokenVerifier` protocol by validating the
 incoming JWT against the authorization server: the signature is checked with a
 key from the issuer's published JWKS, and the issuer and expiry are enforced.
 The token's ``sub`` claim is the Rapidata CustomerId; the raw JWT is carried
-through on the resulting :class:`AccessToken` so a per-request client can
-forward it to the API gateway, which scopes data access by that customer.
+through on the resulting :class:`AccessToken` so it can be exchanged for an api
+token, which the API gateway scopes by that customer.
 """
 
 from __future__ import annotations
