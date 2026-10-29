@@ -45,7 +45,9 @@ def api_clients(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
 @pytest.fixture
 def exchanger() -> TokenExchanger:
-    return TokenExchanger(ISSUER, "rapidata-mcp-server", "s3cret", API_RESOURCE)
+    return TokenExchanger(
+        ISSUER, "rapidata-mcp-server", API_RESOURCE, client_secret="s3cret"
+    )
 
 
 def _issue(tokens: list[str], expires_in: int = 3600):
@@ -153,6 +155,72 @@ def test_refused_exchange_is_an_auth_error(
     assert api_clients == []
 
 
+def _form(request: httpx.Request) -> dict[str, str]:
+    return {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+
+
+@respx.mock
+def test_assertion_file_replaces_the_secret(tmp_path, clock, api_clients):
+    assertion = tmp_path / "token"
+    assertion.write_text("sa-jwt-1\n")
+    route = respx.post(TOKEN_ENDPOINT).mock(side_effect=_issue(["api-1"]))
+    exchanger = TokenExchanger(
+        ISSUER,
+        "rapidata-mcp-server",
+        API_RESOURCE,
+        client_assertion_file=str(assertion),
+        client_secret="s3cret",
+    )
+
+    ExchangedTokenProvider(exchanger, MCP_TOKEN).get_client()
+
+    request = route.calls.last.request
+    form = _form(request)
+    assert form["client_id"] == "rapidata-mcp-server"
+    assert form["client_assertion_type"] == (
+        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    )
+    assert form["client_assertion"] == "sa-jwt-1"
+    assert "client_secret" not in form
+    assert "authorization" not in request.headers
+    assert "s3cret" not in request.content.decode()
+
+
+@respx.mock
+def test_assertion_file_is_reread_after_rotation(tmp_path, clock, api_clients):
+    assertion = tmp_path / "token"
+    assertion.write_text("sa-jwt-1")
+    route = respx.post(TOKEN_ENDPOINT).mock(side_effect=_issue(["api-1", "api-2"]))
+    exchanger = TokenExchanger(
+        ISSUER,
+        "rapidata-mcp-server",
+        API_RESOURCE,
+        client_assertion_file=str(assertion),
+    )
+
+    ExchangedTokenProvider(exchanger, "mcp-a").get_client()
+    assertion.write_text("sa-jwt-2")
+    ExchangedTokenProvider(exchanger, "mcp-b").get_client()
+
+    assert [_form(c.request)["client_assertion"] for c in route.calls] == [
+        "sa-jwt-1",
+        "sa-jwt-2",
+    ]
+
+
+def test_unreadable_assertion_file_is_an_exchange_error(tmp_path, clock, api_clients):
+    exchanger = TokenExchanger(
+        ISSUER,
+        "rapidata-mcp-server",
+        API_RESOURCE,
+        client_assertion_file=str(tmp_path / "missing"),
+    )
+
+    with pytest.raises(TokenExchangeError, match="cannot read client assertion"):
+        ExchangedTokenProvider(exchanger, MCP_TOKEN).get_client()
+    assert api_clients == []
+
+
 def test_factory_without_secret_forwards(monkeypatch, caplog):
     from rapidata_mcp import server
 
@@ -163,7 +231,7 @@ def test_factory_without_secret_forwards(monkeypatch, caplog):
     )
     factory = server._token_provider_factory(server.Settings(client_secret=None))
     assert isinstance(factory(), auth.TokenClientProvider)
-    assert "RAPIDATA_MCP_CLIENT_SECRET is not set" in caplog.text
+    assert "RAPIDATA_MCP_CLIENT_ASSERTION_FILE" in caplog.text
 
 
 def test_factory_with_secret_exchanges(monkeypatch):
@@ -176,3 +244,15 @@ def test_factory_with_secret_exchanges(monkeypatch):
     )
     factory = server._token_provider_factory(server.Settings(client_secret="s"))
     assert isinstance(factory(), ExchangedTokenProvider)
+
+
+def test_settings_read_the_assertion_file(monkeypatch):
+    from rapidata_mcp import server
+
+    monkeypatch.setenv(
+        "RAPIDATA_MCP_CLIENT_ASSERTION_FILE", "/var/run/secrets/rapidata/identity/token"
+    )
+    monkeypatch.delenv("RAPIDATA_MCP_CLIENT_SECRET", raising=False)
+    settings = server.Settings.from_env()
+    assert settings.client_assertion_file == "/var/run/secrets/rapidata/identity/token"
+    assert settings.client_secret is None

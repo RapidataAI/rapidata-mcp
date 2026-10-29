@@ -12,9 +12,9 @@ run under different auth models:
   the hosted, multi-tenant transport plugs into: validate the caller's bearer
   token, then build a per-request client scoped to that customer. The SDK
   already accepts a ``token`` object, so no SDK change is needed to get here.
-* ``ExchangedTokenProvider`` — the hosted default once a client secret is set:
-  the caller's mcp token is exchanged (RFC 8693) for an api token, and only the
-  api token reaches the Rapidata API.
+* ``ExchangedTokenProvider`` — the hosted default once client credentials are
+  set: the caller's mcp token is exchanged (RFC 8693) for an api token, and only
+  the api token reaches the Rapidata API.
 """
 
 from __future__ import annotations
@@ -73,6 +73,7 @@ class TokenClientProvider:
 
 _TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 _ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+_JWT_BEARER_ASSERTION = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
 
 class TokenExchangeError(RuntimeError):
@@ -83,22 +84,28 @@ class TokenExchanger:
     """Exchanges mcp access tokens for api access tokens, caching each result.
 
     Shared across requests; the cache is keyed by ``sha256(subject token)`` and an
-    entry lives until the exchanged token expires, minus ``skew`` seconds.
+    entry lives until the exchanged token expires, minus ``skew`` seconds. The
+    client authenticates with a JWT read from ``client_assertion_file`` on every
+    exchange (the kubelet rotates it) or, without one, with ``client_secret``.
     """
 
     def __init__(
         self,
         issuer_url: str,
         client_id: str,
-        client_secret: str,
         api_resource: str,
         *,
+        client_assertion_file: str | None = None,
+        client_secret: str | None = None,
         scope: str = "api",
         skew: int = 60,
         http: httpx.Client | None = None,
     ) -> None:
         self._token_endpoint = f"{issuer_url.rstrip('/')}/connect/token"
         self._client_id = client_id
+        if not client_assertion_file and not client_secret:
+            raise ValueError("A client assertion file or client secret is required")
+        self._client_assertion_file = client_assertion_file
         self._client_secret = client_secret
         self._api_resource = api_resource
         self._scope = scope
@@ -125,18 +132,36 @@ class TokenExchanger:
         return token
 
     def _request(self, subject_token: str, now: float) -> dict:
+        data = {
+            "grant_type": _TOKEN_EXCHANGE_GRANT,
+            "subject_token": subject_token,
+            "subject_token_type": _ACCESS_TOKEN_TYPE,
+            "resource": self._api_resource,
+            "scope": self._scope,
+        }
+        auth: httpx.BasicAuth | None = None
+        if self._client_assertion_file:
+            try:
+                with open(self._client_assertion_file) as f:
+                    assertion = f.read().strip()
+            except OSError as e:
+                raise TokenExchangeError(
+                    f"Token exchange failed: cannot read client assertion: {e}"
+                ) from e
+            data |= {
+                "client_id": self._client_id,
+                "client_assertion_type": _JWT_BEARER_ASSERTION,
+                "client_assertion": assertion,
+            }
+        else:
+            assert self._client_secret is not None
+            auth = httpx.BasicAuth(self._client_id, self._client_secret)
+
         try:
-            resp = self._http.post(
-                self._token_endpoint,
-                data={
-                    "grant_type": _TOKEN_EXCHANGE_GRANT,
-                    "subject_token": subject_token,
-                    "subject_token_type": _ACCESS_TOKEN_TYPE,
-                    "resource": self._api_resource,
-                    "scope": self._scope,
-                },
-                auth=(self._client_id, self._client_secret),
-            )
+            if auth is None:
+                resp = self._http.post(self._token_endpoint, data=data)
+            else:
+                resp = self._http.post(self._token_endpoint, data=data, auth=auth)
         except httpx.HTTPError as e:
             raise TokenExchangeError(f"Token exchange failed: {e}") from e
 

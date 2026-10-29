@@ -256,6 +256,7 @@ class Settings:
     environment: str | None = None
     auth_disabled: bool = False
     client_id: str = "rapidata-mcp-server"
+    client_assertion_file: str | None = None
     client_secret: str | None = None
     api_resource: str = "https://api.rapidata.ai"
 
@@ -275,6 +276,8 @@ class Settings:
             environment=os.environ.get("RAPIDATA_ENVIRONMENT") or None,
             auth_disabled=_env_flag("RAPIDATA_MCP_AUTH_DISABLED"),
             client_id=os.environ.get("RAPIDATA_MCP_CLIENT_ID", cls.client_id),
+            client_assertion_file=os.environ.get("RAPIDATA_MCP_CLIENT_ASSERTION_FILE")
+            or None,
             client_secret=os.environ.get("RAPIDATA_MCP_CLIENT_SECRET") or None,
             api_resource=os.environ.get(
                 "RAPIDATA_MCP_API_RESOURCE", cls.api_resource
@@ -295,22 +298,24 @@ def _token_provider_factory(settings: Settings):
 
     The token has already been verified by :class:`JWTVerifier`; here we read it
     back off the request's auth context and exchange it for an api token, which
-    the SDK sends to the gateway. Without a client secret the mcp token is
-    forwarded as is.
+    the SDK sends to the gateway. Without a client assertion file or secret the
+    mcp token is forwarded as is.
     """
     environment = settings.environment
     exchanger: TokenExchanger | None = None
-    if settings.client_secret:
+    if settings.client_assertion_file or settings.client_secret:
         exchanger = TokenExchanger(
             settings.issuer_url,
             settings.client_id,
-            settings.client_secret,
             settings.api_resource,
+            client_assertion_file=settings.client_assertion_file,
+            client_secret=settings.client_secret,
         )
     else:
         logger.warning(
-            "RAPIDATA_MCP_CLIENT_SECRET is not set — forwarding the caller's mcp "
-            "token to the Rapidata API instead of exchanging it for an api token."
+            "Neither RAPIDATA_MCP_CLIENT_ASSERTION_FILE nor RAPIDATA_MCP_CLIENT_SECRET "
+            "is set — forwarding the caller's mcp token to the Rapidata API instead "
+            "of exchanging it for an api token."
         )
 
     def factory() -> ClientProvider:
