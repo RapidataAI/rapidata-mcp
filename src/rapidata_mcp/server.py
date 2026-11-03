@@ -12,10 +12,15 @@ here is the resource-server shell around it.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
+import html
 import logging
 import os
+import re
 from dataclasses import dataclass, field
+from importlib import resources
 
 from mcp.server.auth.middleware.auth_context import (
     AuthContextMiddleware,
@@ -35,7 +40,12 @@ from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
 from starlette.routing import Route
 
 from rapidata_mcp.auth import (
@@ -74,6 +84,14 @@ _INSTRUCTIONS = (
     "curated subset of the Rapidata platform: classification and comparison on the "
     "global audience, created as a draft and run only after you confirm the cost "
     "with the user (creating never spends; start_job does).\n\n"
+    "Media (images, video, audio) goes into a task as asset references, never as "
+    "URLs or file paths: run it through upload_media first. Pass public URLs as "
+    "urls, or files the user attached in ChatGPT as files. For local files, call "
+    "upload_media with no arguments: run the curl_command it returns if you have a "
+    "shell where the files are, or else give the user its upload_page_url and call "
+    "list_uploads once they are done. Then pass the references to "
+    "create_classification_task or create_comparison_task. Never substitute "
+    "placeholder images for media you could not upload.\n\n"
     "Billing is pre-paid, pay-as-you-go for individual (non-organization) accounts, "
     "and new sign-ups get $20 in free credit — so trying these tools out is free.\n\n"
     "For anything beyond that — other task types (ranking, draw, locate, free text, "
@@ -150,6 +168,40 @@ _OVERVIEW_HTML = """<!doctype html>
   </ul>
 </body>
 </html>"""
+
+
+_UPLOAD_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _upload_page(api_url: str) -> tuple[str, dict[str, str]]:
+    """The upload page, and headers that let it run only its own inline code and
+    talk only to the API."""
+    page = (resources.files("rapidata_mcp") / "upload_page.html").read_text("utf-8")
+    page = page.replace("__RAPIDATA_API_URL__", html.escape(api_url, quote=True))
+    policy = [
+        "default-src 'none'",
+        f"script-src {_inline_hash(page, 'script')}",
+        f"style-src {_inline_hash(page, 'style')}",
+        f"connect-src {api_url}",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ]
+    headers = {
+        "Content-Security-Policy": "; ".join(policy),
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return page, headers
+
+
+def _inline_hash(page: str, tag: str) -> str:
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", page, re.DOTALL)
+    if match is None:
+        raise RuntimeError(f"upload_page.html has no inline <{tag}>")
+    digest = hashlib.sha256(match.group(1).encode("utf-8")).digest()
+    return f"'sha256-{base64.b64encode(digest).decode('ascii')}'"
 
 
 class _BrowserLandingApp:
@@ -284,6 +336,11 @@ class Settings:
             ),
         )
 
+    @property
+    def api_url(self) -> str:
+        """Base URL of the Rapidata API, as the SDK derives it from the environment."""
+        return f"https://api.{self.environment or 'rapidata.ai'}"
+
 
 def _silence_sdk_stdout() -> None:
     """Keep the Rapidata SDK from printing to stdout and from emitting OTLP."""
@@ -370,7 +427,12 @@ def build_app(settings: Settings | None = None) -> Starlette:
         stateless_http=True,
         json_response=True,
     )
-    register_tools(mcp, provider_factory)
+    register_tools(
+        mcp,
+        provider_factory,
+        api_url=settings.api_url,
+        public_url=settings.resource_url,
+    )
 
     # Build the Streamable-HTTP transport directly so the OAuth shell below is
     # fully under our control (FastMCP couples advertised scopes to enforced
@@ -405,9 +467,18 @@ def build_app(settings: Settings | None = None) -> Starlette:
     async def landing(request: Request) -> HTMLResponse:
         return HTMLResponse(_OVERVIEW_HTML)
 
+    upload_html, upload_headers = _upload_page(settings.api_url)
+
+    async def upload_page(request: Request) -> Response:
+        if not _UPLOAD_SESSION_ID.fullmatch(request.path_params["session_id"]):
+            return PlainTextResponse("Not Found", status_code=404)
+        return HTMLResponse(upload_html, headers=upload_headers)
+
     routes = [
         Route("/", landing, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
+        # No auth layer: the page's uploads carry the session's upload token instead.
+        Route("/upload/{session_id}", upload_page, methods=["GET"]),
         Route(_METADATA_PATH, protected_resource_metadata, methods=["GET"]),
         # RFC 9728 also lets clients build the metadata URL by inserting the
         # resource's path after /.well-known/, so serve that form too (otherwise

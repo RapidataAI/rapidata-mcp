@@ -102,6 +102,18 @@ def test_exchanges_once_per_token_and_api_never_sees_mcp_token(
 
 
 @respx.mock
+def test_api_token_is_the_exchanged_token(exchanger, clock, api_clients):
+    route = respx.post(TOKEN_ENDPOINT).mock(side_effect=_issue(["api-1", "api-2"]))
+    provider = ExchangedTokenProvider(exchanger, MCP_TOKEN)
+
+    assert provider.get_api_token() == "api-1"
+    provider.get_client()
+
+    assert route.call_count == 1
+    assert api_clients[0]["token"]["access_token"] == "api-1"
+
+
+@respx.mock
 def test_distinct_subject_tokens_are_cached_separately(exchanger, clock, api_clients):
     route = respx.post(TOKEN_ENDPOINT).mock(side_effect=_issue(["api-a", "api-b"]))
 
