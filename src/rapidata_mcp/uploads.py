@@ -10,10 +10,9 @@ from urllib.parse import quote
 import httpx
 
 # The asset service names every stored file "<guid><extension>"; that is the reference.
-_REFERENCE = re.compile(
-    r"[0-9a-f]{8}(?:-?[0-9a-f]{4}){3}-?[0-9a-f]{12}(?:\.[0-9a-z]{1,16})?",
-    re.IGNORECASE,
-)
+# Processing can rewrite the extension (.webp, GIF to video), so any extension passes.
+_GUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}"
+_REFERENCE = re.compile(rf"(?:{_GUID})(?:\.[^./\\]+)?", re.IGNORECASE)
 # The SDK's own URL test: whatever fails it is read as a path on this server's disk.
 _HTTP_URL = re.compile(r"https?://", re.IGNORECASE)
 
