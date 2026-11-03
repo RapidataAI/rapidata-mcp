@@ -126,7 +126,7 @@ def test_upload_media_without_inputs_opens_an_upload_session():
         f"'{API}/asset/upload-session/ups_1/file'"
     )
     assert result["expires_at"] == "2026-11-03T12:00:00Z"
-    assert "curl_command" in result["next_step"]
+    assert "run curl_command once per file" in result["next_step"]
     assert "list_uploads" in result["next_step"]
     assert provider.client.asset.imported == []
 
@@ -214,11 +214,15 @@ def test_list_uploads_returns_references():
     assert result["expires_at"] == "2026-11-03T12:00:00Z"
 
 
-def test_list_uploads_of_an_unknown_session_is_a_clear_error():
-    api = Api({"GET /asset/upload-session/ups_x": httpx.Response(404)})
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(403, "'ups_x' belongs to another Rapidata account"), (404, "'ups_x' not found")],
+)
+def test_list_uploads_explains_a_refused_session(status, message):
+    api = Api({"GET /asset/upload-session/ups_x": httpx.Response(status)})
     mcp, _ = _server(api)
 
-    with pytest.raises(ToolError, match="'ups_x' not found"):
+    with pytest.raises(ToolError, match=message):
         _call(mcp, "list_uploads", upload_session_id="ups_x")
 
 

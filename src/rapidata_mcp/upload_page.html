@@ -83,7 +83,7 @@
   const id = decodeURIComponent(location.pathname.split("/").filter(Boolean).pop() || "");
   const token = new URLSearchParams(location.hash.slice(1)).get("t");
   const maxBytes = 50 * 1024 * 1024;
-  const parallel = 3;
+  const parallel = 2;
   const drop = document.getElementById("drop");
   const picker = document.getElementById("picker");
   const list = document.getElementById("files");

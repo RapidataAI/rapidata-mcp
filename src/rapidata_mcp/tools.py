@@ -283,14 +283,16 @@ def register_tools(
             "expires_at": session.get("expiresAt"),
             "next_step": (
                 "This is an upload link for local files. If you can run shell "
-                "commands on the machine that has the files, run curl_command with "
-                "<path> replaced by the file's path, repeating -F 'file=@<path>' once "
-                "per file; the JSON it prints lists each file's reference as "
-                "fileName. If you cannot (or curl cannot reach the API), show the "
-                "user upload_page_url as a link, ask them to drop the files there "
-                "and to tell you when they are done, then call list_uploads with "
-                f"this upload_session_id. The link takes up to {max_files} files of "
-                f"at most {max_mb} MB each until expires_at. {_USE_REFERENCES}"
+                "commands on the machine that has the files, run curl_command once "
+                "per file with <path> replaced by that file's path. Never put "
+                "several files in one request: the API rejects a request over 100 "
+                "MB, and one bad file fails the whole request. Each run prints JSON "
+                "whose fileName is that file's reference. If you cannot run curl "
+                "(or it cannot reach the API), show the user upload_page_url as a "
+                "link, ask them to drop the files there and to tell you when they "
+                "are done, then call list_uploads with this upload_session_id. The "
+                f"link takes up to {max_files} files of at most {max_mb} MB each "
+                f"until expires_at. {_USE_REFERENCES}"
             ),
         }
 

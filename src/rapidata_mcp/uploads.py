@@ -58,10 +58,15 @@ class UploadSessions:
 
     def get(self, token: str, session_id: str) -> dict[str, Any]:
         resp = self._send("GET", f"/asset/upload-session/{_segment(session_id)}", token)
-        if resp.status_code in (403, 404):
+        if resp.status_code == 403:
             raise UploadSessionError(
-                f"Upload session {session_id!r} not found: it belongs to another "
-                "account, or it was created more than 7 days ago."
+                f"Upload session {session_id!r} belongs to another Rapidata account; "
+                "only the account that created it can list its files."
+            )
+        if resp.status_code == 404:
+            raise UploadSessionError(
+                f"Upload session {session_id!r} not found. Sessions stay readable "
+                "for 7 days after upload_media creates them."
             )
         return _json(resp)
 

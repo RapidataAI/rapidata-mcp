@@ -38,7 +38,7 @@ The create tools take **asset references only** — the file name the Rapidata a
 | Files attached in ChatGPT | `upload_media(files=[…])` — ChatGPT fills `files` itself (`_meta["openai/fileParams"]`) | One reference per file. |
 | Local files | `upload_media()` | A one-hour upload link: `curl_command` and `upload_page_url`. |
 
-For local files, an agent with a shell runs `curl_command` (one `-F 'file=@<path>'` per file); the JSON it prints lists each file's reference as `fileName`. In a chat client without file access, the user opens `upload_page_url`, drops the files and returns to the chat; the agent then calls `list_uploads(upload_session_id)`. The link accepts up to 100 files of at most 50 MB each for one hour, and its uploads stay listable for 7 days. Its upload token travels in the URL fragment (`#t=…`), so it never reaches this server's logs.
+For local files, an agent with a shell runs `curl_command` once per file; each run prints JSON with that file's reference as `fileName`. One file per request is deliberate: the API rejects a request body over 100 MB, and one rejected file fails the whole request. In a chat client without file access, the user opens `upload_page_url`, drops the files and returns to the chat; the agent then calls `list_uploads(upload_session_id)`. The link accepts up to 100 files of at most 50 MB each for one hour, and its uploads stay listable for 7 days. Its upload token travels in the URL fragment (`#t=…`), so it never reaches this server's logs.
 
 ```mermaid
 flowchart LR
