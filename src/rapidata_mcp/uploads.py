@@ -56,8 +56,10 @@ class UploadSessions:
     def create(self, token: str) -> dict[str, Any]:
         return _json(self._send("POST", "/asset/upload-session", token))
 
-    def get(self, token: str, session_id: str) -> dict[str, Any]:
-        resp = self._send("GET", f"/asset/upload-session/{_segment(session_id)}", token)
+    def files(self, token: str, session_id: str) -> list[dict[str, Any]]:
+        # page_size 100 equals a session's maxFiles: one page holds the whole session.
+        path = f"/asset/upload-session/{_segment(session_id)}/files?page_size=100"
+        resp = self._send("GET", path, token)
         if resp.status_code == 403:
             raise UploadSessionError(
                 f"Upload session {session_id!r} belongs to another Rapidata account; "
@@ -68,7 +70,7 @@ class UploadSessions:
                 f"Upload session {session_id!r} not found. Sessions stay readable "
                 "for 7 days after upload_media creates them."
             )
-        return _json(resp)
+        return _json(resp).get("items") or []
 
     def file_endpoint(self, session_id: str) -> str:
         return f"{self.api_url}/asset/upload-session/{_segment(session_id)}/file"

@@ -202,7 +202,7 @@ prompt.
 | `GET /health` | none | Liveness/readiness probe → `{"status":"ok"}`. |
 
 The upload sessions themselves live on the Rapidata API, not here: `POST /asset/upload-session`
-and `GET /asset/upload-session/{id}` (called by the tools with the exchanged API token), and
+and `GET /asset/upload-session/{id}/files` (called by the tools with the exchanged API token), and
 `POST /asset/upload-session/{id}/file` (called by curl or the page with `X-Upload-Token`).
 
 ## Local development

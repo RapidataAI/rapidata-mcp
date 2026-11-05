@@ -114,7 +114,6 @@ class MediaUpload(_MediaUploadBase, total=False):
 
 class UploadList(TypedDict):
     upload_session_id: str
-    expires_at: str | None
     assets: list[AssetReference]
     next_step: str
 
@@ -413,26 +412,26 @@ def register_tools(
         named as the user's original file; the list stays readable for 7 days.
         """
         session_id = upload_session_id.strip()
-        session = sessions.get(provider_factory().get_api_token(), session_id)
+        files = sessions.files(provider_factory().get_api_token(), session_id)
         assets: list[AssetReference] = [
             {
                 "source": file.get("originalName") or file["fileName"],
                 "reference": file["fileName"],
                 "error": None,
             }
-            for file in session.get("files") or []
+            for file in files
         ]
         next_step = _USE_REFERENCES
         if not assets:
             next_step = (
                 "Nothing has been uploaded yet. Ask the user to drop their files on "
                 "the upload page and to tell you when they are done, then call "
-                "list_uploads again. The link takes uploads until expires_at; after "
-                "that, call upload_media() for a new one."
+                "list_uploads again. The link takes uploads until the expires_at "
+                "that upload_media returned; after that, call upload_media() for a "
+                "new one."
             )
         return {
-            "upload_session_id": session.get("id") or session_id,
-            "expires_at": session.get("expiresAt"),
+            "upload_session_id": session_id,
             "assets": assets,
             "next_step": next_step,
         }

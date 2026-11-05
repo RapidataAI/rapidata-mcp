@@ -189,15 +189,17 @@ def test_upload_media_never_reads_a_server_path(url):
 def test_list_uploads_returns_references():
     api = Api(
         {
-            "GET /asset/upload-session/ups_1": httpx.Response(
+            "GET /asset/upload-session/ups_1/files": httpx.Response(
                 200,
                 json={
-                    "id": "ups_1",
-                    "expiresAt": "2026-11-03T12:00:00Z",
-                    "files": [
+                    "items": [
                         {"originalName": "a.png", "fileName": REF_A, "uploadedAt": "x"},
                         {"originalName": "b.mp4", "fileName": REF_B, "uploadedAt": "y"},
                     ],
+                    "total": 2,
+                    "page": 1,
+                    "pageSize": 100,
+                    "totalPages": 1,
                 },
             )
         }
@@ -206,12 +208,26 @@ def test_list_uploads_returns_references():
 
     result = _call(mcp, "list_uploads", upload_session_id="ups_1")
 
-    assert api.requests[0].headers["authorization"] == "Bearer api-token"
+    request = api.requests[0]
+    assert request.headers["authorization"] == "Bearer api-token"
+    assert request.url.params["page_size"] == "100"
+    assert result["upload_session_id"] == "ups_1"
     assert result["assets"] == [
         {"source": "a.png", "reference": REF_A, "error": None},
         {"source": "b.mp4", "reference": REF_B, "error": None},
     ]
-    assert result["expires_at"] == "2026-11-03T12:00:00Z"
+
+
+def test_list_uploads_of_an_empty_session_says_to_wait():
+    empty = {"items": [], "total": 0, "page": 1, "pageSize": 100, "totalPages": 0}
+    route = "GET /asset/upload-session/ups_1/files"
+    api = Api({route: httpx.Response(200, json=empty)})
+    mcp, _ = _server(api)
+
+    result = _call(mcp, "list_uploads", upload_session_id="ups_1")
+
+    assert result["assets"] == []
+    assert result["next_step"].startswith("Nothing has been uploaded yet.")
 
 
 @pytest.mark.parametrize(
@@ -219,7 +235,7 @@ def test_list_uploads_returns_references():
     [(403, "'ups_x' belongs to another Rapidata account"), (404, "'ups_x' not found")],
 )
 def test_list_uploads_explains_a_refused_session(status, message):
-    api = Api({"GET /asset/upload-session/ups_x": httpx.Response(status)})
+    api = Api({"GET /asset/upload-session/ups_x/files": httpx.Response(status)})
     mcp, _ = _server(api)
 
     with pytest.raises(ToolError, match=message):
