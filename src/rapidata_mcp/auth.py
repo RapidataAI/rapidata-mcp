@@ -35,6 +35,10 @@ class ClientProvider(Protocol):
 
     def get_client(self) -> RapidataClient: ...
 
+    def get_api_token(self) -> str:
+        """The bearer token that :meth:`get_client`'s client sends to the API."""
+        ...
+
 
 class EnvClientProvider:
     """Builds one :class:`RapidataClient` from ambient credentials and reuses it."""
@@ -53,6 +57,9 @@ class EnvClientProvider:
                     self._client = RapidataClient(environment=self._environment)
         return self._client
 
+    def get_api_token(self) -> str:
+        return self.get_client().get_token()["access_token"]
+
 
 class TokenClientProvider:
     """Builds a :class:`RapidataClient` from a caller-supplied OAuth token.
@@ -69,6 +76,9 @@ class TokenClientProvider:
         from rapidata import RapidataClient
 
         return RapidataClient(token=self._token, environment=self._environment)
+
+    def get_api_token(self) -> str:
+        return self._token["access_token"]
 
 
 _TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -226,3 +236,6 @@ class ExchangedTokenProvider:
 
         token = self._exchanger.exchange(self._subject_token)
         return RapidataClient(token=dict(token), environment=self._environment)
+
+    def get_api_token(self) -> str:
+        return self._exchanger.exchange(self._subject_token)["access_token"]
