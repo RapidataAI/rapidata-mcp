@@ -22,9 +22,15 @@ RUN pip install --no-cache-dir . ${RAPIDATA_VERSION:+rapidata==${RAPIDATA_VERSIO
 RUN useradd --create-home --uid 10001 app
 USER app
 
+# The image tag the build pushes, which the server reports as its version. Declared
+# after the install so a new tag doesn't invalidate the cached layers above.
+ARG RAPIDATA_MCP_IMAGE_TAG=""
+ENV RAPIDATA_MCP_IMAGE_TAG=${RAPIDATA_MCP_IMAGE_TAG}
+
 EXPOSE 8000
 
-# Liveness/readiness: GET /health is unauthenticated and returns {"status":"ok"}.
+# Liveness/readiness: GET /health is unauthenticated and returns
+# {"status":"ok","version":"<image tag> · rapidata <sdk version>"}.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os,urllib.request,sys; \
 url='http://127.0.0.1:%s/health' % os.environ.get('PORT','8000'); \

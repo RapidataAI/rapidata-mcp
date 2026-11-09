@@ -20,7 +20,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from importlib import resources
+from importlib import metadata, resources
 
 from mcp.server.auth.middleware.auth_context import (
     AuthContextMiddleware,
@@ -297,6 +297,13 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def server_version() -> str:
+    """The image tag this server was built as (``dev`` outside the image) and the
+    rapidata SDK it runs, e.g. ``sha-5f696e2 · rapidata 3.29.0``."""
+    tag = os.environ.get("RAPIDATA_MCP_IMAGE_TAG", "").strip() or "dev"
+    return f"{tag} · rapidata {metadata.version('rapidata')}"
+
+
 @dataclass
 class Settings:
     """Server configuration, resolved from the environment."""
@@ -414,9 +421,10 @@ def build_app(settings: Settings | None = None) -> Starlette:
     else:
         provider_factory = _token_provider_factory(settings)
 
+    version = server_version()
     mcp = FastMCP(
         "rapidata",
-        instructions=_INSTRUCTIONS,
+        instructions=f"{_INSTRUCTIONS}\n\nServer version: {version}.",
         website_url="https://docs.rapidata.ai/",
         icons=[
             Icon(
@@ -428,6 +436,8 @@ def build_app(settings: Settings | None = None) -> Starlette:
         stateless_http=True,
         json_response=True,
     )
+    # FastMCP takes no version, and without one serverInfo reports the mcp library's.
+    mcp._mcp_server.version = version
     register_tools(
         mcp,
         provider_factory,
@@ -463,7 +473,7 @@ def build_app(settings: Settings | None = None) -> Starlette:
         return JSONResponse(metadata)
 
     async def health(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok", "version": version})
 
     async def landing(request: Request) -> HTMLResponse:
         return HTMLResponse(_OVERVIEW_HTML)

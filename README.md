@@ -190,6 +190,7 @@ prompt.
 | `RAPIDATA_ENVIRONMENT` | _(SDK default)_ | Rapidata SDK environment to target. |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address. |
 | `LOG_LEVEL` | `INFO` | Logging level. |
+| `RAPIDATA_MCP_IMAGE_TAG` | _(unset → `dev`)_ | Set by the image build to the tag it pushes. The server reports it, with the rapidata SDK version, as its version. |
 | `RAPIDATA_MCP_AUTH_DISABLED` | _(unset)_ | **Local dev only.** Serve without auth using ambient SDK credentials (`RAPIDATA_CLIENT_ID` / `RAPIDATA_CLIENT_SECRET`). |
 
 ## Endpoints
@@ -199,7 +200,7 @@ prompt.
 | `POST/GET/DELETE /mcp` | Bearer JWT | The MCP Streamable-HTTP endpoint. |
 | `GET /.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata. |
 | `GET /upload/{id}` | none (the page's uploads carry the link's upload token) | Static page that uploads dropped files to an `upload_media` link. |
-| `GET /health` | none | Liveness/readiness probe → `{"status":"ok"}`. |
+| `GET /health` | none | Liveness/readiness probe → `{"status":"ok","version":"sha-5f696e2 · rapidata 3.29.0"}`. |
 
 The upload sessions themselves live on the Rapidata API, not here: `POST /asset/upload-session`
 and `GET /asset/upload-session/{id}/files` (called by the tools with the exchanged API token), and
@@ -239,6 +240,16 @@ The build resolves the `rapidata` SDK from PyPI, so the version baked into an im
 whichever was current when it was built. `--build-arg RAPIDATA_VERSION=3.19.2` pins an
 exact one instead; the SDK's release workflow passes it to rebuild this image on every
 stable SDK release, so the deployed server keeps tracking the SDK it wraps.
+
+`--build-arg RAPIDATA_MCP_IMAGE_TAG=sha-5f696e2` names the build; CI passes the tag it
+pushes. The server reports it with the installed SDK version, e.g.
+`sha-5f696e2 · rapidata 3.29.0`, in three places: `GET /health`, `serverInfo.version` in
+the `initialize` response, and the last line of the server instructions. Without the build
+arg it reports `dev`. To see what is deployed:
+
+```bash
+curl https://mcp.rapidata.ai/health
+```
 
 ## Architecture
 
