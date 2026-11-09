@@ -176,6 +176,23 @@ npx @modelcontextprotocol/inspector
 Enter the URL `https://mcp.rapidata.ai/mcp`, transport **Streamable HTTP**, and complete the OAuth
 prompt.
 
+### Getting new tools after an update
+
+Clients cache the tool list, and this server cannot tell them it changed: it is stateless, so
+it never sends `notifications/tools/list_changed`. An existing connection picks up new or changed
+tools only when its client reads the list again:
+
+| Client | How to get the new tools |
+|---|---|
+| Claude (web, desktop and mobile apps) | Start a new chat about an hour after the update. If the tools are still missing, use **Refresh tools list** on the connector, or **Disconnect** and connect again. As a last resort, remove the connector and add it again as `https://mcp.rapidata.ai/mcp?v=2`; any new query string works, and you sign in again. |
+| Claude Code | Start a new session, or run `/mcp` and select **Reconnect**. |
+| ChatGPT | Published app: OpenAI rescans the server daily, and new tools appear once they pass its automated checks. Custom connection: open it under **Plugins**, select **Refresh**, then start a new conversation. |
+| Codex (ChatGPT apps) | Start a new session or run `/apps`. Codex offers the tools that ChatGPT has. |
+| Cursor | Quit Cursor completely and reopen it, or remove the server and add it again. |
+
+`curl https://mcp.rapidata.ai/health` shows the version that is live. Agents that read the server
+instructions, such as Claude Code, also get it on the last line of those instructions.
+
 ## Configuration
 
 | Variable | Default | Purpose |
