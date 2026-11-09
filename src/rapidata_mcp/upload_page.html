@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<meta name="rapidata-api" content="__RAPIDATA_API_URL__">
+<title>Upload files · Rapidata</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --ok: #15803d;
+    --err: #b91c1c;
+    --tint: rgba(127,127,127,.08);
+    --line: rgba(127,127,127,.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --muted: #9ca3af; --accent: #60a5fa; --ok: #4ade80; --err: #f87171; }
+  }
+  body {
+    font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    max-width: 42rem; margin: 4rem auto; padding: 0 1.25rem;
+  }
+  @media (max-width: 30rem) { body { margin: 2rem auto; padding: 0 1rem; } }
+  h1 { font-size: 1.6rem; margin-bottom: .25rem; }
+  .sub { color: var(--muted); margin-top: 0; }
+  .drop {
+    display: block; position: relative; cursor: pointer; text-align: center;
+    background: var(--tint); border: 2px dashed var(--line); border-radius: .6em;
+    padding: 2rem 1.25rem; margin: 1.5rem 0;
+  }
+  .drop:focus-within, .drop.over { border-color: var(--accent); }
+  .drop.off { opacity: .5; pointer-events: none; }
+  .drop input {
+    position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0;
+    cursor: pointer;
+  }
+  .drop strong { display: block; font-size: 1.1rem; }
+  .pick {
+    display: inline-block; margin-top: .75rem; padding: .45rem 1rem;
+    border-radius: .4em; background: #2563eb; color: #fff;
+  }
+  .hint { color: var(--muted); font-size: .9rem; margin: .75rem 0 0; }
+  ul { list-style: none; padding: 0; margin: 1.5rem 0; }
+  li {
+    display: flex; gap: .75rem; align-items: baseline; padding: .5rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .state { flex: none; max-width: 60%; text-align: right; color: var(--muted); }
+  .state.ok { color: var(--ok); }
+  .state.err { color: var(--err); }
+  .card {
+    background: var(--tint); border-radius: .6em; padding: 1rem 1.25rem;
+    margin: 1.5rem 0;
+  }
+  .card.err { color: var(--err); }
+  .card p { margin: .25rem 0 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>Upload files to Rapidata</h1>
+  <p class="sub">Your AI assistant will use them in a Rapidata labeling task.</p>
+  <div id="problem" class="card err" role="alert" hidden></div>
+  <label id="drop" class="drop">
+    <input id="picker" type="file" multiple accept="image/*,video/*,audio/*">
+    <strong>Drop files here</strong>
+    <span class="pick">or choose files</span>
+    <p class="hint">Images, videos or audio · up to 50 MB each · 100 files at most</p>
+  </label>
+  <ul id="files" aria-live="polite"></ul>
+  <div id="done" class="card" role="status" hidden>
+    <strong>Done — go back to your chat</strong>
+    <p>Tell your assistant the files are uploaded.</p>
+  </div>
+<script>
+(() => {
+  const api = document.querySelector('meta[name="rapidata-api"]').content.replace(/\/+$/, "");
+  const id = decodeURIComponent(location.pathname.split("/").filter(Boolean).pop() || "");
+  const token = new URLSearchParams(location.hash.slice(1)).get("t");
+  const maxBytes = 50 * 1024 * 1024;
+  const parallel = 2;
+  const drop = document.getElementById("drop");
+  const picker = document.getElementById("picker");
+  const list = document.getElementById("files");
+  const done = document.getElementById("done");
+  const problem = document.getElementById("problem");
+  const queue = [];
+  let active = 0;
+  let uploaded = 0;
+  let closed = false;
+
+  function stop(message) {
+    closed = true;
+    problem.textContent = message;
+    problem.hidden = false;
+    drop.classList.add("off");
+    picker.disabled = true;
+  }
+
+  function show(state, text, kind) {
+    state.textContent = text;
+    state.className = kind ? `state ${kind}` : "state";
+  }
+
+  function addRow(file) {
+    const row = document.createElement("li");
+    const name = document.createElement("span");
+    const state = document.createElement("span");
+    name.className = "name";
+    name.textContent = file.name;
+    show(state, "Waiting…");
+    row.append(name, state);
+    list.append(row);
+    return state;
+  }
+
+  function reason(xhr) {
+    if (xhr.status === 401) return "This upload link is not valid. Ask your assistant for a new one.";
+    if (xhr.status === 410) return "This upload link has expired. Ask your assistant for a new one.";
+    if (xhr.status === 413) return "Too large: at most 50 MB.";
+    if (xhr.status === 0) return "Network error. Check your connection and try again.";
+    let body = null;
+    try { body = JSON.parse(xhr.responseText); } catch (e) { body = null; }
+    if (body && typeof body === "object") {
+      const errors = body.errors ? Object.values(body.errors).flat() : [];
+      const text = errors[0] || body.detail || body.title;
+      if (text) return String(text);
+    }
+    return `Upload failed (HTTP ${xhr.status}).`;
+  }
+
+  function send(item) {
+    active += 1;
+    show(item.state, "Uploading…");
+    const form = new FormData();
+    form.append("file", item.file, item.file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${api}/asset/upload-session/${encodeURIComponent(id)}/file`);
+    xhr.setRequestHeader("X-Upload-Token", token);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) show(item.state, `Uploading… ${Math.floor((e.loaded / e.total) * 100)}%`);
+    };
+    xhr.onloadend = () => {
+      active -= 1;
+      if (xhr.status === 200) {
+        uploaded += 1;
+        show(item.state, "✓", "ok");
+      } else {
+        show(item.state, `✗ ${reason(xhr)}`, "err");
+        if (xhr.status === 401 || xhr.status === 410) stop(reason(xhr));
+      }
+      next();
+    };
+    xhr.send(form);
+  }
+
+  function next() {
+    if (closed) {
+      queue.splice(0).forEach((item) => show(item.state, "✗ Not uploaded", "err"));
+    }
+    while (!closed && active < parallel && queue.length) send(queue.shift());
+    done.hidden = closed || active > 0 || queue.length > 0 || uploaded === 0;
+  }
+
+  function add(files) {
+    if (closed) return;
+    for (const file of files) {
+      const state = addRow(file);
+      if (file.size > maxBytes) show(state, "✗ Too large: at most 50 MB.", "err");
+      else queue.push({ file, state });
+    }
+    next();
+  }
+
+  if (!token || !id) {
+    stop("This link is incomplete. Copy the whole link from your chat, including everything after #, and open it again.");
+    return;
+  }
+
+  picker.addEventListener("change", () => {
+    add(Array.from(picker.files));
+    picker.value = "";
+  });
+  ["dragenter", "dragover"].forEach((type) => drop.addEventListener(type, (e) => {
+    e.preventDefault();
+    drop.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach((type) => drop.addEventListener(type, () => drop.classList.remove("over")));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    add(Array.from(e.dataTransfer.files));
+  });
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
+})();
+</script>
+</body>
+</html>

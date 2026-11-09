@@ -1,9 +1,10 @@
 """The Rapidata MCP tool layer.
 
 Exposes a small, curated set of tools that let an MCP-capable agent run human
-labeling tasks on Rapidata: create a classification or comparison job definition
-(a draft, no spend), start it on the global audience (the single money-spending
-step), poll its status, and fetch shaped results.
+labeling tasks on Rapidata: upload media as asset references, create a
+classification or comparison job definition from them (a draft, no spend), start
+it on the global audience (the single money-spending step), poll its status, and
+fetch shaped results.
 
 The create step never spends: it produces a *draft job definition* and asks the
 caller to confirm with the user before ``start_job`` runs it on the global
@@ -20,18 +21,23 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Annotated, Any
+from urllib.parse import quote
 
+import httpx
 from mcp.types import ToolAnnotations
-from pydantic import Field
-from typing_extensions import TypedDict
+from pydantic import BeforeValidator, Field
+from typing_extensions import NotRequired, TypedDict
 
 from rapidata_mcp.auth import ClientProvider
 from rapidata_mcp.results import summarize_results
+from rapidata_mcp.uploads import UploadSessions, check_reference, is_http_url
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
+    from rapidata import UploadedAsset
     from rapidata.rapidata_client.job.rapidata_job import RapidataJob
     from rapidata.rapidata_client.job.rapidata_job_definition import (
         RapidataJobDefinition,
@@ -68,6 +74,48 @@ _FINISHED_STATES = {"Completed", "Paused"}
 # crowd of human annotators, and caller-supplied public media URLs — an open
 # world of external entities, so openWorldHint is true throughout.
 _OPEN_WORLD = True
+
+_MAX_IMPORTS = 100
+_IMPORT_WORKERS = 8
+
+_USE_REFERENCES = (
+    "Pass the references to create_classification_task (datapoint_references) or "
+    "create_comparison_task (comparison_pairs); they take nothing else."
+)
+
+
+# ChatGPT's file object; its app review rejects a schema that drops one of the four
+# properties or requires mime_type or file_name.
+class ChatGPTFile(TypedDict):
+    download_url: str
+    file_id: str
+    mime_type: NotRequired[str]
+    file_name: NotRequired[str]
+
+
+class AssetReference(TypedDict):
+    source: str
+    reference: str | None
+    error: str | None
+
+
+class _MediaUploadBase(TypedDict):
+    assets: list[AssetReference]
+    next_step: str
+
+
+# FastMCP serialises absent keys as null, so every optional field must allow it.
+class MediaUpload(_MediaUploadBase, total=False):
+    upload_session_id: str | None
+    upload_page_url: str | None
+    curl_command: str | None
+    expires_at: str | None
+
+
+class UploadList(TypedDict):
+    upload_session_id: str
+    assets: list[AssetReference]
+    next_step: str
 
 
 class DraftResult(TypedDict):
@@ -130,8 +178,21 @@ class PausedJob(TypedDict):
     paused: bool
 
 
+def _none_as_empty(value: Any) -> Any:
+    return () if value is None else value
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
 def register_tools(
-    mcp: FastMCP, provider_factory: Callable[[], ClientProvider]
+    mcp: FastMCP,
+    provider_factory: Callable[[], ClientProvider],
+    *,
+    api_url: str = "https://api.rapidata.ai",
+    public_url: str = "https://mcp.rapidata.ai",
+    http: httpx.Client | None = None,
 ) -> None:
     """Register all Rapidata tools on ``mcp``.
 
@@ -140,10 +201,20 @@ def register_tools(
         provider_factory: Resolves the :class:`ClientProvider` for the current
             call. Called once per tool invocation so per-request, token-scoped
             clients work without the tools knowing about the auth model.
+        api_url: Base URL of the Rapidata API the upload sessions live on.
+        public_url: This server's public origin, which serves the upload page.
+        http: HTTP client for the upload-session calls.
     """
+    sessions = UploadSessions(api_url, http)
+    public_url = public_url.rstrip("/")
 
     def _client():
         return provider_factory().get_client()
+
+    def _uploaded(reference: str, where: str) -> UploadedAsset:
+        from rapidata import UploadedAsset
+
+        return UploadedAsset(name=check_reference(reference, where))
 
     def _job(job_id: str) -> RapidataJob:
         return _client().job.get_job_by_id(job_id)
@@ -183,6 +254,189 @@ def register_tools(
             ),
         }
 
+    def _open_upload_session() -> MediaUpload:
+        session = sessions.create(provider_factory().get_api_token())
+        session_id: str = session["id"]
+        upload_token: str = session["uploadToken"]
+        max_files = session.get("maxFiles") or 100
+        max_mb = (session.get("maxFileSizeBytes") or 50 * 1024 * 1024) // (1024 * 1024)
+        # The token rides in the fragment, which browsers never send to a server.
+        page_url = (
+            f"{public_url}/upload/{quote(session_id, safe='')}"
+            f"#t={quote(upload_token, safe='')}"
+        )
+        curl_command = " ".join(
+            [
+                "curl -sS -H",
+                _shell_quote(f"X-Upload-Token: {upload_token}"),
+                "-F",
+                _shell_quote("file=@<path>"),
+                _shell_quote(sessions.file_endpoint(session_id)),
+            ]
+        )
+        return {
+            "assets": [],
+            "upload_session_id": session_id,
+            "upload_page_url": page_url,
+            "curl_command": curl_command,
+            "expires_at": session.get("expiresAt"),
+            "next_step": (
+                "This is an upload link for local files. If you can run shell "
+                "commands on the machine that has the files, run curl_command once "
+                "per file with <path> replaced by that file's path. Never put "
+                "several files in one request: the API rejects a request over 100 "
+                "MB, and one bad file fails the whole request. Each run prints JSON "
+                "whose fileName is that file's reference, or an error saying why the "
+                "file was rejected; tell the user about it. If you cannot run curl "
+                "(or it cannot reach the API), show the user upload_page_url as a "
+                "link, ask them to drop the files there and to tell you when they "
+                "are done, then call list_uploads with this upload_session_id. The "
+                f"link takes up to {max_files} files of at most {max_mb} MB each "
+                f"until expires_at. {_USE_REFERENCES}"
+            ),
+        }
+
+    @mcp.tool(
+        title="Upload media",
+        annotations=ToolAnnotations(
+            title="Upload media",
+            # Stores media or opens an upload link: no spend, nothing destroyed.
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=_OPEN_WORLD,
+        ),
+        # ChatGPT fills `files` with the files the user attached to the chat.
+        meta={"openai/fileParams": ["files"]},
+    )
+    def upload_media(
+        urls: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Public http(s) URLs of images, videos or audio files to import. "
+                    "One reference comes back per URL."
+                )
+            ),
+        ] = None,
+        files: Annotated[
+            Sequence[ChatGPTFile],
+            BeforeValidator(_none_as_empty),
+            Field(
+                description=(
+                    "Files the user attached in ChatGPT; ChatGPT fills these in. "
+                    "One reference comes back per file."
+                )
+            ),
+        ] = (),
+    ) -> MediaUpload:
+        """Turn media into asset references, the only media the create tools accept.
+
+        Media already online: pass its public URLs as ``urls``. Files the user
+        attached in ChatGPT arrive as ``files``. Both are imported right away and
+        return one reference each, or an ``error`` for an item that failed.
+
+        Local files (on the user's computer or yours): call this with neither. It
+        opens a one-hour upload link and returns a ready-to-run ``curl_command``
+        for agents with a shell, and an ``upload_page_url`` the user can drop files
+        on, after which ``list_uploads`` returns their references. Follow
+        ``next_step``. Uploading never spends; it does not create or start a task.
+        """
+        sources: list[tuple[str, str]] = []
+        for i, url in enumerate(urls or []):
+            url = url.strip()
+            if not is_http_url(url):
+                raise ValueError(
+                    f"urls[{i}] is not an http(s) URL. For a local file, call "
+                    "upload_media() without arguments and follow its next_step."
+                )
+            sources.append((url, url))
+        for i, file in enumerate(files):
+            if not is_http_url(file["download_url"]):
+                raise ValueError(f"files[{i}].download_url is not an http(s) URL")
+            source = file.get("file_name") or file["file_id"]
+            sources.append((source, file["download_url"]))
+
+        if not sources:
+            return _open_upload_session()
+        if len(sources) > _MAX_IMPORTS:
+            raise ValueError(
+                f"upload_media imports at most {_MAX_IMPORTS} items per call; "
+                "split them across several calls."
+            )
+
+        client = _client()
+
+        def import_one(item: tuple[str, str]) -> AssetReference:
+            source, url = item
+            try:
+                reference = client.asset.upload(url).name
+            except Exception as e:
+                error = str(e) or type(e).__name__
+                return {"source": source, "reference": None, "error": error[:500]}
+            return {"source": source, "reference": reference, "error": None}
+
+        workers = min(len(sources), _IMPORT_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            assets = list(pool.map(import_one, sources))
+
+        failed = sum(1 for asset in assets if asset["error"] is not None)
+        next_step = _USE_REFERENCES
+        if failed:
+            next_step = (
+                f"{failed} of {len(assets)} could not be imported (see error). "
+                "Each URL must be public and point straight at an image, video or "
+                f"audio file. {_USE_REFERENCES}"
+            )
+        return {"assets": assets, "next_step": next_step}
+
+    @mcp.tool(
+        title="List uploads",
+        annotations=ToolAnnotations(
+            title="List uploads",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=_OPEN_WORLD,
+        ),
+    )
+    def list_uploads(
+        upload_session_id: Annotated[
+            str,
+            Field(description="The upload_session_id that upload_media returned."),
+        ],
+    ) -> UploadList:
+        """List the files uploaded to an upload_media link, with their references.
+
+        Call it once the user says they finished dropping files on the upload page
+        (curl already prints the references). Returns every file uploaded so far,
+        named as the user's original file; the list stays readable for 7 days.
+        """
+        session_id = upload_session_id.strip()
+        files = sessions.files(provider_factory().get_api_token(), session_id)
+        assets: list[AssetReference] = [
+            {
+                "source": file.get("originalName") or file["fileName"],
+                "reference": file["fileName"],
+                "error": None,
+            }
+            for file in files
+        ]
+        next_step = _USE_REFERENCES
+        if not assets:
+            next_step = (
+                "Nothing has been uploaded yet. Ask the user to drop their files on "
+                "the upload page and to tell you when they are done, then call "
+                "list_uploads again. The link takes uploads until the expires_at "
+                "that upload_media returned; after that, call upload_media() for a "
+                "new one."
+            )
+        return {
+            "upload_session_id": session_id,
+            "assets": assets,
+            "next_step": next_step,
+        }
+
     @mcp.tool(
         title="Create classification task",
         annotations=ToolAnnotations(
@@ -213,13 +467,15 @@ def register_tools(
                 ),
             ),
         ],
-        datapoint_urls: Annotated[
+        datapoint_references: Annotated[
             list[str] | None,
             Field(
                 description=(
-                    "One publicly reachable URL per item to label "
-                    "(image/video/audio). Optional — omit it to ask the instruction "
-                    "on its own against a generic placeholder image."
+                    "One asset reference per item to label (image, video or audio), "
+                    "as returned by upload_media or list_uploads. URLs and file paths "
+                    "are rejected: run them through upload_media first. Omit only "
+                    "for a genuinely text-only question with no media at all; "
+                    "annotators then see a generic placeholder image."
                 )
             ),
         ] = None,
@@ -251,16 +507,27 @@ def register_tools(
     ) -> DraftResult:
         """Create a classification task where humans pick one answer option per item.
 
+        Media goes in as asset references from ``upload_media``, never as URLs or
+        paths. Leave ``datapoint_references`` out only for a text-only question:
+        never as a fallback for media you could not upload.
+
         Creates a DRAFT job definition and does NOT start collecting responses (or
         spend): it returns ``confirmation_required`` and expects you to confirm the
         cost with the user, then call ``start_job``. When run, the task goes to the
         global audience (no targeting).
         """
-        datapoints = datapoint_urls if datapoint_urls else [_PLACEHOLDER_IMAGE_URL]
+        datapoints: list[str | UploadedAsset] = (
+            [
+                _uploaded(reference, f"datapoint_references[{i}]")
+                for i, reference in enumerate(datapoint_references)
+            ]
+            if datapoint_references
+            else [_PLACEHOLDER_IMAGE_URL]
+        )
         if contexts is not None and len(contexts) != len(datapoints):
             raise ValueError(
                 "contexts, when provided, must have one entry per datapoint "
-                "(same length as datapoint_urls)"
+                "(same length as datapoint_references)"
             )
 
         definition = _client().job.create_classification_job_definition(
@@ -296,8 +563,10 @@ def register_tools(
             list[list[str]],
             Field(
                 description=(
-                    "List of [item_a_url, item_b_url] pairs; each pair holds exactly "
-                    "two publicly reachable URLs."
+                    "List of [reference_a, reference_b] pairs; each pair holds "
+                    "exactly two asset references, as returned by upload_media or "
+                    "list_uploads. URLs and file paths are rejected: run them "
+                    "through upload_media first."
                 )
             ),
         ],
@@ -332,9 +601,9 @@ def register_tools(
         Useful for evaluating or ranking outputs (e.g. which of two images better
         matches a prompt). Like classification, it creates a DRAFT job definition
         and only spends once you confirm the cost with the user and call
-        ``start_job``. Each pair must hold exactly two publicly reachable URLs, so
-        (unlike classification) the media is required. When run, it goes to the
-        global audience.
+        ``start_job``. Each pair must hold exactly two asset references from
+        ``upload_media`` (never URLs or paths), so (unlike classification) the
+        media is required. When run, it goes to the global audience.
         """
         if not comparison_pairs:
             raise ValueError("comparison_pairs must not be empty")
@@ -346,11 +615,15 @@ def register_tools(
                 "contexts, when provided, must have one entry per pair "
                 "(same length as comparison_pairs)"
             )
+        pairs = [
+            [_uploaded(r, f"comparison_pairs[{i}][{j}]") for j, r in enumerate(pair)]
+            for i, pair in enumerate(comparison_pairs)
+        ]
 
         definition = _client().job.create_compare_job_definition(
             name=name,
             instruction=instruction,
-            datapoints=comparison_pairs,
+            datapoints=pairs,
             responses_per_datapoint=responses_per_datapoint,
             contexts=contexts,
             confidence_threshold=confidence_threshold,

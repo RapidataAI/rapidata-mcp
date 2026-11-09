@@ -16,6 +16,8 @@ Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (
 
 | Tool | Purpose |
 |---|---|
+| `upload_media` | Turn media into **asset references**: imports public URLs or ChatGPT attachments, or opens an upload link for local files. **No spend.** |
+| `list_uploads` | The references of the files uploaded to an upload link. |
 | `create_classification_task` | Humans pick one option per item. Creates a draft job definition — **no spend**. |
 | `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition — **no spend**. |
 | `start_job` | Run a draft job definition on the global audience — **the single step that spends.** |
@@ -24,7 +26,30 @@ Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (
 | `list_jobs` | Your most recent jobs. |
 | `pause_job` | Stop collecting (and spending). |
 
-Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as URLs: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_urls` for classification — where it is **optional**: omit it and the crowd answers the instruction on its own against a generic placeholder image.
+Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
+
+### Media: upload first, then pass references
+
+The create tools take **asset references only** — the file name the Rapidata asset service gives an upload (e.g. `3f2a9c1e-5b7d-4e2a-9c1f-0d8e7a6b5c4d.png`). They reject URLs and file paths with an error that points at `upload_media`, and upload nothing themselves. `upload_media` makes the references, whatever the media's source:
+
+| Source | Call | What comes back |
+|---|---|---|
+| Public URLs | `upload_media(urls=[…])` | One reference per URL, imported right away. |
+| Files attached in ChatGPT | `upload_media(files=[…])` — ChatGPT fills `files` itself (`_meta["openai/fileParams"]`) | One reference per file. |
+| Local files | `upload_media()` | A one-hour upload link: `curl_command` and `upload_page_url`. |
+
+For local files, an agent with a shell runs `curl_command` once per file; each run prints JSON with that file's reference as `fileName`. One file per request is deliberate: the API rejects a request body over 100 MB, and one rejected file fails the whole request. In a chat client without file access, the user opens `upload_page_url`, drops the files and returns to the chat; the agent then calls `list_uploads(upload_session_id)`. The link accepts up to 100 files of at most 50 MB each for one hour, and its uploads stay listable for 7 days. Its upload token travels in the URL fragment (`#t=…`), so it never reaches this server's logs.
+
+```mermaid
+flowchart LR
+  agent["Agent"] -->|"upload_media()"| mcp["mcp.rapidata.ai"]
+  mcp -->|"POST /asset/upload-session"| api["api.rapidata.ai"]
+  agent -->|"curl -F file=@…"| api
+  user["User's browser"] -->|"GET /upload/{id}#t=…"| mcp
+  user -->|"POST /asset/upload-session/{id}/file"| api
+  agent -->|"list_uploads"| mcp
+  agent -->|"create_*_task(references)"| mcp
+```
 
 Two invariants hold across the tool layer:
 
@@ -102,11 +127,9 @@ PKCE client at:
 POST https://auth.rapidata.ai/client/register
 ```
 
-> **Interim note.** Until the sibling identity-server change ships, the authorization-server
-> discovery document (`https://auth.rapidata.ai/.well-known/oauth-authorization-server`) does **not**
-> yet advertise a `registration_endpoint`. Use the registration URL above explicitly. Clients that
-> rely solely on discovery to find the registration endpoint will need it configured manually until
-> then.
+The authorization-server discovery document
+(`https://auth.rapidata.ai/.well-known/oauth-authorization-server`) advertises it as
+`registration_endpoint`, so clients that rely on discovery find it on their own.
 
 ### 3. Authorization Code + PKCE
 
@@ -121,7 +144,8 @@ Run the standard authorization-code flow with PKCE:
 - One-time browser consent, then the client exchanges the code (with its PKCE verifier) for an
   access token and a refresh token.
 
-The resulting access token's `sub` claim is the Rapidata **CustomerId**. The server forwards the raw
+The resulting access token's `sub` claim is the Rapidata **CustomerId**. The server exchanges it
+([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)) for an API token and sends only that
 token to the Rapidata API gateway, which scopes orders/assets to that customer.
 
 ### What the server validates
@@ -174,7 +198,12 @@ prompt.
 |---|---|---|
 | `POST/GET/DELETE /mcp` | Bearer JWT | The MCP Streamable-HTTP endpoint. |
 | `GET /.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata. |
+| `GET /upload/{id}` | none (the page's uploads carry the link's upload token) | Static page that uploads dropped files to an `upload_media` link. |
 | `GET /health` | none | Liveness/readiness probe → `{"status":"ok"}`. |
+
+The upload sessions themselves live on the Rapidata API, not here: `POST /asset/upload-session`
+and `GET /asset/upload-session/{id}/files` (called by the tools with the exchanged API token), and
+`POST /asset/upload-session/{id}/file` (called by curl or the page with `X-Upload-Token`).
 
 ## Local development
 
@@ -217,22 +246,25 @@ stable SDK release, so the deployed server keeps tracking the SDK it wraps.
 client ──Bearer JWT──▶ /mcp ──▶ RequireAuth ─▶ FastMCP tools
                          │           │              │
                          │      JWTVerifier      provider_factory()
-                         │   (JWKS, iss, exp)    get_access_token() ─▶ TokenClientProvider
+                         │   (JWKS, iss, exp)    get_access_token() ─▶ ExchangedTokenProvider
                          │                              │
                          ▼                              ▼
-          /.well-known/oauth-protected-resource   RapidataClient(token=…) ─▶ Rapidata API gateway
+          /.well-known/oauth-protected-resource   RapidataClient(token=api token) ─▶ Rapidata API gateway
 ```
 
-- `tools.py` — the 7 tools; transport- and auth-agnostic, resolved through a `ClientProvider`.
-- `auth.py` — the client-resolution seam (`TokenClientProvider` for hosted, `EnvClientProvider` for
-  local dev).
+- `tools.py` — the 9 tools; transport- and auth-agnostic, resolved through a `ClientProvider`.
+- `uploads.py` — asset-reference checks and the API's upload-session endpoints.
+- `auth.py` — the client-resolution seam (`ExchangedTokenProvider` for hosted, `EnvClientProvider`
+  for local dev).
 - `token_verifier.py` — JWT validation against the issuer's JWKS (`TokenVerifier`).
-- `server.py` — the Streamable-HTTP + OAuth resource-server shell and per-request client wiring.
+- `server.py` — the Streamable-HTTP + OAuth resource-server shell, per-request client wiring, and
+  the upload page (`upload_page.html`).
 
 ## Scope (Stage 1)
 
-URL datapoints only (no local upload), classification + comparison only, the global audience (no
-targeting/filters), no validation sets / signals / flows / leaderboards. Those are later stages, and
+Media as asset references (from URLs, ChatGPT attachments or local files), classification +
+comparison only, the global audience (no targeting/filters), no validation sets / signals / flows /
+leaderboards. Those are later stages, and
 the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
 above). Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
 `start_job` assigns it to the global audience.
