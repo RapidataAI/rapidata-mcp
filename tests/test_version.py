@@ -68,3 +68,22 @@ def test_initialize_reports_the_version(image_tag):
         ],
     }
     assert result["instructions"].endswith(f"\n\nServer version: {VERSION}.")
+
+
+def test_tools_list_logs_the_user_agent(caplog):
+    tools_list = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    with TestClient(build_app(Settings(auth_disabled=True))) as client:
+        with caplog.at_level("INFO", logger="rapidata_mcp.server"):
+            resp = client.post(
+                "/mcp",
+                json=tools_list,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "User-Agent": "openai-mcp/1.0.0",
+                    "Mcp-Protocol-Version": "2025-11-25",
+                },
+            )
+
+    assert resp.status_code == 200
+    assert len(resp.json()["result"]["tools"]) == 9
+    assert "tools/list from openai-mcp/1.0.0" in caplog.messages

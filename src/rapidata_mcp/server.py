@@ -230,14 +230,12 @@ class _BrowserLandingApp:
         await self._app(scope, receive, send)
 
 
-class _ClientErrorLoggingApp:
-    """Logs request details when the transport answers 4xx.
+_TOOLS_LIST = re.compile(rb'"method"\s*:\s*"tools/list"')
 
-    Production sees a steady rate of 400s on POST /mcp whose cause the access
-    log can't show; this captures the offending request (key MCP headers and a
-    bounded body prefix) so they can be diagnosed. Sits inside the auth layer,
-    so expected 401s never reach it.
-    """
+
+class _RequestLoggingApp:
+    """Logs each tools/list's user agent, and the request when the transport answers
+    4xx; the access log shows neither. Inside the auth layer, so 401s never reach it."""
 
     def __init__(self, app, max_body: int = 2048) -> None:
         self._app = app
@@ -266,11 +264,13 @@ class _ClientErrorLoggingApp:
 
         await self._app(scope, recording_receive, recording_send)
 
-        if status and 400 <= status[0] < 500:
-            headers = {
-                key.decode("latin-1"): value.decode("latin-1")
-                for key, value in scope.get("headers", [])
-            }
+        headers = {
+            key.decode("latin-1"): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        if status and status[0] == 200 and _TOOLS_LIST.search(b"".join(body_parts)):
+            logger.info("tools/list from %s", headers.get("user-agent", "-"))
+        elif status and 400 <= status[0] < 500:
             relevant = {
                 name: headers[name]
                 for name in (
@@ -453,7 +453,7 @@ def build_app(settings: Settings | None = None) -> Starlette:
     session_manager = StreamableHTTPSessionManager(
         app=mcp._mcp_server, json_response=True, stateless=True
     )
-    streamable_asgi = _ClientErrorLoggingApp(StreamableHTTPASGIApp(session_manager))
+    streamable_asgi = _RequestLoggingApp(StreamableHTTPASGIApp(session_manager))
 
     # Advertise the canonical resource id, with the empty-path "/". A bare origin (no
     # path) isn't a canonical absolute URI, and the auth server (OpenIddict) rejects it
