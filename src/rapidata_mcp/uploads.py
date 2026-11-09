@@ -33,7 +33,9 @@ def check_reference(value: str, where: str) -> str:
     if is_http_url(reference):
         raise ValueError(
             f"{where} is a URL ({shown!r}), not an asset reference. Import it with "
-            "upload_media(urls=[...]) and pass the reference it returns."
+            "upload_media(urls=[...]) and pass the reference it returns. If you have "
+            "no upload_media tool, your client is showing an outdated tool list: ask "
+            "the user to start a new chat or refresh the Rapidata connector."
         )
     raise ValueError(
         f"{where} ({shown!r}) is not an asset reference. For a local file, call "

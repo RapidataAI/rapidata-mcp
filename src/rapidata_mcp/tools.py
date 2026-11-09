@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from urllib.parse import quote
 
 import httpx
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field
 from typing_extensions import NotRequired, TypedDict
@@ -77,6 +78,11 @@ _OPEN_WORLD = True
 
 _MAX_IMPORTS = 100
 _IMPORT_WORKERS = 8
+
+_OUTDATED_TOOLS = (
+    "Your client is showing an outdated list of Rapidata tools. Ask the user to start "
+    "a new chat or refresh the Rapidata connector, then use the tools it lists."
+)
 
 _USE_REFERENCES = (
     "Pass the references to create_classification_task (datapoint_references) or "
@@ -847,3 +853,23 @@ def register_tools(
         # The SDK's RapidataJob has no public pause wrapper yet, so call the job API.
         job._openapi_service.order.job_api.job_job_id_pause_post(job.id)
         return {"job_id": job.id, "status": job.get_status(), "paused": True}
+
+    _reject_outdated_calls(mcp)
+
+
+def _reject_outdated_calls(mcp: FastMCP) -> None:
+    """Fail a call made from an older tool list instead of dropping the arguments it
+    no longer takes: a dropped media argument turns into the placeholder image."""
+    manager = mcp._tool_manager
+    call_tool = manager.call_tool
+
+    async def checked_call(name: str, arguments: dict[str, Any], *args, **kwargs):
+        tool = manager.get_tool(name)
+        if tool is None:
+            raise ToolError(f"Unknown tool: {name}. {_OUTDATED_TOOLS}")
+        unknown = sorted(set(arguments) - set(tool.parameters.get("properties", {})))
+        if unknown:
+            raise ToolError(f"{name} takes no {', '.join(unknown)}. {_OUTDATED_TOOLS}")
+        return await call_tool(name, arguments, *args, **kwargs)
+
+    manager.call_tool = checked_call

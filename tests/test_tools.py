@@ -328,3 +328,33 @@ def test_create_tools_reject_anything_but_a_reference(value, message):
             comparison_pairs=[[value, REF_A]],
         )
     assert provider.client.job.created == []
+
+
+def test_an_argument_from_an_older_tool_list_is_rejected_not_dropped():
+    mcp, provider = _server()
+
+    with pytest.raises(ToolError, match=r"takes no datapoint_urls\. .*outdated"):
+        _call(
+            mcp,
+            "create_classification_task",
+            name="n",
+            instruction="Is this a cat?",
+            answer_options=["yes", "no"],
+            datapoint_urls=["https://example.test/cat.png"],
+        )
+    with pytest.raises(ToolError, match=r"Unknown tool: create_task\. .*outdated"):
+        _call(mcp, "create_task", name="n")
+    assert provider.client.job.created == []
+
+
+def test_a_url_where_a_reference_belongs_mentions_an_outdated_tool_list():
+    mcp, _ = _server()
+
+    with pytest.raises(ToolError, match=r"no upload_media tool.*outdated tool list"):
+        _call(
+            mcp,
+            "create_comparison_task",
+            name="n",
+            instruction="i",
+            comparison_pairs=[["https://example.test/a.png", REF_A]],
+        )
