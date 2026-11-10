@@ -85,5 +85,5 @@ def test_tools_list_logs_the_user_agent(caplog):
             )
 
     assert resp.status_code == 200
-    assert len(resp.json()["result"]["tools"]) == 10
+    assert len(resp.json()["result"]["tools"]) == 11
     assert "tools/list from openai-mcp/1.0.0" in caplog.messages
