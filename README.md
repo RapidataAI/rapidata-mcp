@@ -208,6 +208,7 @@ instructions, such as Claude Code, also get it on the last line of those instruc
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address. |
 | `LOG_LEVEL` | `INFO` | Logging level. |
 | `RAPIDATA_MCP_IMAGE_TAG` | _(unset → `dev`)_ | Set by the image build to the tag it pushes. The server reports it, with the rapidata SDK version, as its version. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset → no export)_ | OTLP/gRPC collector for the traces: one span per tool call (service `rapidata-mcp-service`), a child span per API call, continued by the backend. |
 | `RAPIDATA_MCP_AUTH_DISABLED` | _(unset)_ | **Local dev only.** Serve without auth using ambient SDK credentials (`RAPIDATA_CLIENT_ID` / `RAPIDATA_CLIENT_SECRET`). |
 
 ## Endpoints

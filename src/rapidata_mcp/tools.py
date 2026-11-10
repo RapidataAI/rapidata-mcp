@@ -19,6 +19,7 @@ behaviour is otherwise identical regardless of how the client is resolved.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 from collections.abc import Callable, Sequence
@@ -384,7 +385,12 @@ def register_tools(
 
         workers = min(len(sources), _IMPORT_WORKERS)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            assets = list(pool.map(import_one, sources))
+            # A context per import keeps its API calls inside this tool call's trace.
+            futures = [
+                pool.submit(contextvars.copy_context().run, import_one, source)
+                for source in sources
+            ]
+            assets = [future.result() for future in futures]
 
         failed = sum(1 for asset in assets if asset["error"] is not None)
         next_step = _USE_REFERENCES
