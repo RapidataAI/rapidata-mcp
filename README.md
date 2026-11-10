@@ -296,7 +296,9 @@ Media as asset references (from URLs, ChatGPT attachments or local files), class
 comparison only, existing audiences narrowed by country or language only, no validation sets / signals / flows /
 leaderboards. Those are later stages, and
 the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
-above). Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
+above). `sdk_coverage.toml` lists every public SDK function as exposed by a tool or left out
+with the reason; a test fails when it misses one, and each SDK release that adds or drops one
+opens an issue. Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
 `start_job` assigns it to the chosen audience.
 
 ## License

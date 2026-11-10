@@ -130,3 +130,52 @@ jobs:
           client_payload: '{"tag": "${{ steps.tag.outputs.value }}", "type": "rapidata-mcp", "overlay": "prod"}'
         env:
           GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}
+
+  # Reports SDK functions sdk_coverage.toml doesn't classify as an issue; a separate
+  # job, so it never blocks the deploy above.
+  sdk-coverage:
+    if: github.event_name == 'repository_dispatch' || inputs.rapidata_version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      SDK_VERSION: ${{ github.event.client_payload.sdk_version || inputs.rapidata_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the released SDK
+        run: |
+          uv venv
+          uv pip install . "rapidata==$SDK_VERSION"
+
+      - name: Compare with sdk_coverage.toml
+        id: check
+        run: |
+          set +e
+          .venv/bin/python -m rapidata_mcp.coverage sdk_coverage.toml > coverage.md
+          code=$?
+          set -e
+          # Exit 1 with a body is drift; anything else non-zero is a crash.
+          if [ "$code" -eq 1 ] && [ -s coverage.md ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+
+      - name: Open an issue
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="rapidata $SDK_VERSION: SDK functions the MCP has not classified"
+          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq length)
+          if [ "$open" -eq 0 ]; then
+            gh issue create --title "$title" --body-file coverage.md
+          fi

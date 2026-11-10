@@ -1,0 +1,294 @@
+# Every public rapidata SDK function: exposed by an MCP tool, or left out and why.
+# `python -m rapidata_mcp.coverage` checks it against the installed SDK.
+
+[exposed.upload_media]
+functions = [
+  "RapidataAssetManager.upload",
+]
+
+[exposed.create_classification_task]
+functions = [
+  "RapidataJobManager.create_classification_job_definition",
+  "RapidataJobDefinition.estimated_cost",
+]
+
+[exposed.create_comparison_task]
+functions = [
+  "RapidataJobManager.create_compare_job_definition",
+  "RapidataJobDefinition.estimated_cost",
+]
+
+[exposed.start_job]
+functions = [
+  "RapidataJobManager.get_job_definition_by_id",
+  "RapidataAudienceManager.get_audience_by_id",
+  "RapidataAudience.filter",
+  "RapidataAudience.get_recruiting_metrics",
+  "RapidataAudience.assign_job",
+  "RapidataAudience.name",
+  "RapidataFilteredAudience.assign_job",
+  "RapidataUnlistedAudience.assign_job",
+  "RapidataUnlistedAudience.name",
+  "RapidataJob.get_status",
+]
+
+[exposed.get_job_status]
+functions = [
+  "RapidataJobManager.get_job_by_id",
+  "RapidataJob.get_progress",
+]
+
+[exposed.get_job_results]
+functions = [
+  "RapidataJob.get_results",
+]
+
+[exposed.list_jobs]
+functions = [
+  "RapidataJobManager.find_jobs",
+]
+
+[exposed.pause_job]
+functions = [
+  "RapidataJob.pause",
+]
+
+[exposed.resume_job]
+functions = [
+  "RapidataJob.resume",
+]
+
+[exposed.get_account_balance]
+functions = [
+  "RapidataBillingManager.get_outstanding_balance",
+]
+
+[left_out.benchmarks]
+why = "Benchmarks and leaderboards need many model outputs uploaded and organized, which the dashboard and SDK do better than a chat."
+functions = [
+  "BenchmarkParticipant.clear_price",
+  "BenchmarkParticipant.delete",
+  "BenchmarkParticipant.deprecate",
+  "BenchmarkParticipant.disable",
+  "BenchmarkParticipant.enable",
+  "BenchmarkParticipant.get_elo",
+  "BenchmarkParticipant.missing_counts",
+  "BenchmarkParticipant.promote",
+  "BenchmarkParticipant.rename",
+  "BenchmarkParticipant.restore",
+  "BenchmarkParticipant.retry_missing",
+  "BenchmarkParticipant.run",
+  "BenchmarkParticipant.set_price",
+  "BenchmarkParticipant.status",
+  "BenchmarkParticipant.upload_media",
+  "RapidataBenchmark.add_model",
+  "RapidataBenchmark.add_prompts",
+  "RapidataBenchmark.create_leaderboard",
+  "RapidataBenchmark.english_prompts",
+  "RapidataBenchmark.evaluate_model",
+  "RapidataBenchmark.get_demographics",
+  "RapidataBenchmark.get_overall_standings",
+  "RapidataBenchmark.get_standings_breakdown",
+  "RapidataBenchmark.get_tag_counts",
+  "RapidataBenchmark.get_win_loss_matrix",
+  "RapidataBenchmark.identifiers",
+  "RapidataBenchmark.leaderboards",
+  "RapidataBenchmark.origins",
+  "RapidataBenchmark.participants",
+  "RapidataBenchmark.prompt_assets",
+  "RapidataBenchmark.prompts",
+  "RapidataBenchmark.run",
+  "RapidataBenchmark.structured_tags",
+  "RapidataBenchmark.tags",
+  "RapidataBenchmark.update",
+  "RapidataBenchmark.update_prompt",
+  "RapidataBenchmark.view",
+  "RapidataBenchmarkManager.create_new_benchmark",
+  "RapidataBenchmarkManager.find_benchmarks",
+  "RapidataBenchmarkManager.get_benchmark_by_id",
+  "RapidataLeaderboard.excluded_tags",
+  "RapidataLeaderboard.get_standings",
+  "RapidataLeaderboard.get_win_loss_matrix",
+  "RapidataLeaderboard.included_tags",
+  "RapidataLeaderboard.instruction",
+  "RapidataLeaderboard.inverse_ranking",
+  "RapidataLeaderboard.jobs",
+  "RapidataLeaderboard.level_of_detail",
+  "RapidataLeaderboard.min_responses_per_matchup",
+  "RapidataLeaderboard.name",
+  "RapidataLeaderboard.response_budget",
+  "RapidataLeaderboard.show_prompt",
+  "RapidataLeaderboard.show_prompt_asset",
+  "RapidataLeaderboard.update",
+  "RapidataLeaderboard.view",
+  "RapidataLeaderboard.vote_aggregation",
+]
+
+[left_out.editing_job_definitions]
+why = "Editing or deleting a job definition adds little: a new draft is free."
+functions = [
+  "RapidataJobDefinition.answer_options",
+  "RapidataJobDefinition.base_revision",
+  "RapidataJobDefinition.dataset_id",
+  "RapidataJobDefinition.delete",
+  "RapidataJobDefinition.discard_changes",
+  "RapidataJobDefinition.has_unsaved_changes",
+  "RapidataJobDefinition.instruction",
+  "RapidataJobDefinition.preview",
+  "RapidataJobDefinition.reload",
+  "RapidataJobDefinition.responses_per_datapoint",
+  "RapidataJobDefinition.revision",
+  "RapidataJobDefinition.revisions",
+  "RapidataJobDefinition.save",
+  "RapidataJobDefinition.set_datapoints",
+  "RapidataJobDefinition.settings",
+  "RapidataJobDefinition.state",
+  "RapidataJobDefinition.update_dataset",
+  "RapidataJobDefinition.validation_set_id",
+  "RapidataJobDefinition.wait_until_ready",
+  "RapidataJobManager.find_job_definitions",
+]
+
+[left_out.other_task_types]
+why = "Locate, draw, select words, free text and ranking each need their own tool; add one when users ask for it."
+functions = [
+  "RapidataJobManager.create_draw_job_definition",
+  "RapidataJobManager.create_free_text_job_definition",
+  "RapidataJobManager.create_locate_job_definition",
+  "RapidataJobManager.create_ranking_job_definition",
+  "RapidataJobManager.create_select_words_job_definition",
+]
+
+[left_out.building_audiences]
+why = "Building a custom audience needs at least 10 hand-checked example questions and days of recruiting; once built in the dashboard, start_job takes its id."
+functions = [
+  "RapidataAudience.add_classification_example",
+  "RapidataAudience.add_compare_example",
+  "RapidataAudience.add_draw_example",
+  "RapidataAudience.add_locate_example",
+  "RapidataAudience.add_select_words_example",
+  "RapidataAudience.delete",
+  "RapidataAudience.delete_example",
+  "RapidataAudience.filters",
+  "RapidataAudience.find_jobs",
+  "RapidataAudience.get_examples",
+  "RapidataAudience.start_recruiting",
+  "RapidataAudience.update_filters",
+  "RapidataAudience.update_name",
+  "RapidataAudienceManager.create_audience",
+  "RapidataAudienceManager.create_unlisted_audience",
+  "RapidataAudienceManager.find_audiences",
+  "RapidataFilteredAudience.filters",
+  "RapidataFilteredAudience.find_jobs",
+  "RapidataFilteredAudience.name",
+  "RapidataUnlistedAudience.filters",
+  "RapidataUnlistedAudience.find_jobs",
+  "RapidataUnlistedAudience.get_job_link",
+  "RapidataUnlistedAudience.link",
+]
+
+[left_out.flows]
+why = "Flows are made for code that runs continuously, not for a chat."
+functions = [
+  "RapidataClassifyFlow.create_new_flow_batch",
+  "RapidataClassifyFlow.delete",
+  "RapidataClassifyFlow.get_flow_items",
+  "RapidataClassifyFlow.update_config",
+  "RapidataFlowItem.get_response_count",
+  "RapidataFlowItem.get_results",
+  "RapidataFlowItem.get_status",
+  "RapidataFlowItem.get_win_loss_matrix",
+  "RapidataFlowManager.create_classify_flow",
+  "RapidataFlowManager.create_ranking_flow",
+  "RapidataFlowManager.find_flows",
+  "RapidataFlowManager.get_flow_by_id",
+  "RapidataFlowManager.preheat",
+  "RapidataRankingFlow.create_new_flow_batch",
+  "RapidataRankingFlow.delete",
+  "RapidataRankingFlow.get_flow_items",
+  "RapidataRankingFlow.update_config",
+]
+
+[left_out.validation_sets]
+why = "Validation sets are made for code that runs continuously, not for a chat."
+functions = [
+  "RapidataValidationSet.add_rapid",
+  "RapidataValidationSet.delete",
+  "RapidataValidationSet.update_can_be_flagged",
+  "RapidataValidationSet.update_dimensions",
+  "RapidataValidationSet.update_should_alert",
+  "RapidataValidationSet.view",
+  "ValidationSetManager.create_classification_set",
+  "ValidationSetManager.create_compare_set",
+  "ValidationSetManager.create_draw_set",
+  "ValidationSetManager.create_locate_set",
+  "ValidationSetManager.create_mixed_set",
+  "ValidationSetManager.create_select_words_set",
+  "ValidationSetManager.create_timestamp_set",
+  "ValidationSetManager.find_validation_sets",
+  "ValidationSetManager.get_validation_set_by_id",
+]
+
+[left_out.scheduled_jobs]
+why = "Signals (scheduled jobs) are made for code that runs continuously, not for a chat."
+functions = [
+  "RapidataSignal.delete",
+  "RapidataSignal.description",
+  "RapidataSignal.get_jobs",
+  "RapidataSignal.interval_hours",
+  "RapidataSignal.is_paused",
+  "RapidataSignal.last_run_at",
+  "RapidataSignal.name",
+  "RapidataSignal.next_run_at",
+  "RapidataSignal.pause",
+  "RapidataSignal.resume",
+  "RapidataSignal.trigger",
+  "RapidataSignal.update",
+  "RapidataSignal.wait_for_next_job",
+  "RapidataSignalManager.create_signal",
+  "RapidataSignalManager.find_signals",
+  "RapidataSignalManager.get_signal_by_id",
+]
+
+[left_out.billing_period]
+why = "get_current_billing_period also needs an active billing period, which new accounts lack; get_account_balance reads GET /billing/summary instead."
+functions = [
+  "RapidataBillingManager.get_current_billing_period",
+]
+
+[left_out.client_setup]
+why = "Credentials and caches of the client: the server builds one per request from the caller's token."
+functions = [
+  "RapidataClient.clear_all_caches",
+  "RapidataClient.get_token",
+  "RapidataClient.maintain_token_file",
+  "RapidataClient.reset_credentials",
+  "RapidataClient.set_token",
+]
+
+[left_out.script_helpers]
+why = "Made for a script: opens a browser, prints, converts results, or reports what the job tools already return."
+functions = [
+  "FailedUpload.format_error_details",
+  "FailedUpload.from_exception",
+  "RapidataJob.completed_at",
+  "RapidataJob.display_progress_bar",
+  "RapidataJob.estimated_cost",
+  "RapidataJob.pipeline_id",
+  "RapidataJob.view",
+  "RapidataResults.to_json",
+  "RapidataResults.to_pandas",
+]
+
+[left_out.deleting_jobs]
+why = "pause_job already stops the spend, and a deletion can't be undone from a chat."
+functions = [
+  "RapidataJob.delete",
+]
+
+[left_out.shortening_contexts]
+why = "Shortens context text with a model for scripts; an assistant shortens its own text."
+functions = [
+  "ContextManager.shorten_context",
+  "ContextManager.shorten_contexts",
+]
