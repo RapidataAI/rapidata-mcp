@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import os
+import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Annotated, Any
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -39,12 +42,14 @@ from rapidata_mcp.uploads import UploadSessions, check_reference, is_http_url
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
-    from rapidata import UploadedAsset
+    from rapidata import RapidataClient, UploadedAsset
     from rapidata.rapidata_client.job.rapidata_job import RapidataJob
     from rapidata.rapidata_client.job.rapidata_job_definition import (
         RapidataJobDefinition,
     )
     from rapidata.rapidata_client.results.rapidata_results import RapidataResults
+
+logger = logging.getLogger(__name__)
 
 # The well-known id of the global audience — the broadest pool of labelers,
 # ready to work immediately with no targeting or qualification setup.
@@ -79,6 +84,11 @@ _OPEN_WORLD = True
 
 _MAX_IMPORTS = 100
 _IMPORT_WORKERS = 8
+
+# The SDK prices a draft within about 5 s but polls for up to 5 minutes; a draft
+# waits at most this long and comes back without a price after it.
+_PRICE_TIMEOUT_S = 10.0
+_pricing = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pricing")
 
 _OUTDATED_TOOLS = (
     "Your client is showing an outdated list of Rapidata tools. Ask the user to start "
@@ -132,8 +142,18 @@ class DraftResult(TypedDict):
     details_url: str
     runs_on: str
     total_responses: int
+    estimated_cost_usd: float | None
+    budget_left_usd: float | None
     confirmation_required: bool
     next_step: str
+
+
+class AccountBalance(TypedDict):
+    mode: Literal["prepaid", "limited", "usage"]
+    budget_left_usd: float | None
+    spent_this_period_usd: float
+    spend_limit_usd: float | None
+    owed_usd: float | None
 
 
 class StartedJob(TypedDict):
@@ -241,8 +261,27 @@ def register_tools(
         return RapidataResults(json.loads(raw))
 
     def _draft_result(
-        definition: RapidataJobDefinition, total_responses: int
+        client: RapidataClient,
+        definition: RapidataJobDefinition,
+        total_responses: int,
     ) -> DraftResult:
+        price = _pricing.submit(
+            contextvars.copy_context().run, _estimated_cost, definition
+        )
+        balance = _pricing.submit(
+            contextvars.copy_context().run, _account_balance, client
+        )
+        deadline = time.monotonic() + _PRICE_TIMEOUT_S
+        cost = _within(price, deadline)
+        account = _within(balance, deadline)
+        budget_left = account["budget_left_usd"] if account else None
+
+        cost_text = f"{total_responses} human responses"
+        if cost is not None:
+            cost_text += f" for about ${cost:.2f} (Rapidata's estimate)"
+        credit_text = ""
+        if budget_left is not None:
+            credit_text = f" The account has ${budget_left:.2f} left to spend."
         return {
             "job_definition_id": definition.id,
             "name": definition.name,
@@ -251,13 +290,15 @@ def register_tools(
             "details_url": definition._job_details_page,
             "runs_on": "global audience",
             "total_responses": total_responses,
+            "estimated_cost_usd": cost,
+            "budget_left_usd": budget_left,
             "confirmation_required": True,
             "next_step": (
                 "This job definition is a DRAFT and is NOT collecting responses "
-                f"yet. Starting it will collect {total_responses} human responses "
-                "on the global audience and spend money. Present this cost to the "
-                "user and ask whether to start collecting. Only after the user "
-                "confirms, call start_job with this job_definition_id."
+                f"yet. Starting it will collect {cost_text} and spend money."
+                f"{credit_text} Present this cost to the user and ask whether to "
+                "start collecting. Only after the user confirms, call start_job "
+                "with this job_definition_id."
             ),
         }
 
@@ -542,7 +583,8 @@ def register_tools(
                 "(same length as datapoint_references)"
             )
 
-        definition = _client().job.create_classification_job_definition(
+        client = _client()
+        definition = client.job.create_classification_job_definition(
             name=name,
             instruction=instruction,
             answer_options=answer_options,
@@ -551,7 +593,9 @@ def register_tools(
             contexts=contexts,
             confidence_threshold=confidence_threshold,
         )
-        return _draft_result(definition, len(datapoints) * responses_per_datapoint)
+        return _draft_result(
+            client, definition, len(datapoints) * responses_per_datapoint
+        )
 
     @mcp.tool(
         title="Create comparison task",
@@ -632,7 +676,8 @@ def register_tools(
             for i, pair in enumerate(comparison_pairs)
         ]
 
-        definition = _client().job.create_compare_job_definition(
+        client = _client()
+        definition = client.job.create_compare_job_definition(
             name=name,
             instruction=instruction,
             datapoints=pairs,
@@ -641,7 +686,7 @@ def register_tools(
             confidence_threshold=confidence_threshold,
         )
         return _draft_result(
-            definition, len(comparison_pairs) * responses_per_datapoint
+            client, definition, len(comparison_pairs) * responses_per_datapoint
         )
 
     @mcp.tool(
@@ -670,7 +715,8 @@ def register_tools(
 
         Runs the job definition created by ``create_*_task`` against the global
         audience, which begins collecting responses and spending. Only call this
-        after confirming the task's cost (``total_responses``) with the user.
+        after confirming the task's cost (``estimated_cost_usd``, or
+        ``total_responses`` when it is null) with the user.
         """
         audience = _client().audience.get_audience_by_id(_GLOBAL_AUDIENCE_ID)
         job = audience.assign_job(_definition(job_definition_id))
@@ -833,6 +879,27 @@ def register_tools(
         }
 
     @mcp.tool(
+        title="Get account balance",
+        annotations=ToolAnnotations(
+            title="Get account balance",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=_OPEN_WORLD,
+        ),
+    )
+    def get_account_balance() -> AccountBalance:
+        """How much the user's Rapidata account can still spend, in US dollars.
+
+        ``mode`` is ``prepaid`` (credit, e.g. the $20 every new account gets),
+        ``limited`` (billed for usage up to ``spend_limit_usd``) or ``usage``
+        (billed for usage). ``budget_left_usd`` is the credit left, or the room
+        under the spending cap; null means no cap. ``owed_usd`` is what ended
+        billing periods left unpaid.
+        """
+        return _account_balance(_client())
+
+    @mcp.tool(
         title="Pause job",
         annotations=ToolAnnotations(
             title="Pause job",
@@ -879,3 +946,56 @@ def _reject_outdated_calls(mcp: FastMCP) -> None:
         return await call_tool(name, arguments, *args, **kwargs)
 
     manager.call_tool = checked_call
+
+
+def _within(future: Future[Any], deadline: float) -> Any:
+    """The future's result, or None when it fails or is not done by ``deadline``."""
+    try:
+        return future.result(timeout=max(deadline - time.monotonic(), 0.0))
+    except FutureTimeout:
+        return None
+    except Exception:
+        logger.warning("Could not price a draft", exc_info=True)
+        return None
+
+
+def _estimated_cost(definition: RapidataJobDefinition) -> float:
+    return round(definition.estimated_cost.estimated_cost, 2)
+
+
+def _account_balance(client: RapidataClient) -> AccountBalance:
+    # The billing summary, unlike the SDK's get_current_billing_period, also
+    # answers for an account that has no billing period yet.
+    summary = client._openapi_service.payment.billing_api.billing_summary_get()
+    mode = _BILLING_MODES.get(summary.mode.value, "usage")
+    spent = summary.current_period_usage
+    limit = summary.effective_limit
+    if mode == "prepaid":
+        left = summary.available_amount
+    elif limit is not None:
+        left = max(limit - spent, 0.0)
+    else:
+        left = None
+    try:
+        owed: float | None = client.billing.get_outstanding_balance()
+    except Exception:
+        logger.warning("Could not read the outstanding balance", exc_info=True)
+        owed = None
+    return {
+        "mode": mode,
+        "budget_left_usd": _cents(left),
+        "spent_this_period_usd": round(spent, 2),
+        "spend_limit_usd": _cents(limit),
+        "owed_usd": owed,
+    }
+
+
+_BILLING_MODES: dict[str, Literal["prepaid", "limited", "usage"]] = {
+    "Prepaid": "prepaid",
+    "Limited": "limited",
+    "Usage": "usage",
+}
+
+
+def _cents(amount: float | None) -> float | None:
+    return None if amount is None else round(amount, 2)
