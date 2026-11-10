@@ -3,12 +3,12 @@
 Exposes a small, curated set of tools that let an MCP-capable agent run human
 labeling tasks on Rapidata: upload media as asset references, create a
 classification or comparison job definition from them (a draft, no spend), start
-it on the global audience (the single money-spending step), poll its status, and
-fetch shaped results.
+it on an audience (the single money-spending step), follow, pause and resume it,
+and fetch shaped results.
 
 The create step never spends: it produces a *draft job definition* and asks the
-caller to confirm with the user before ``start_job`` runs it on the global
-audience. This mirrors the platform's own split between a job definition (the
+caller to confirm with the user before ``start_job`` runs it on an audience.
+This mirrors the platform's own split between a job definition (the
 template) and a job (a run of that definition against an audience).
 
 Tools resolve their client through a ``provider_factory`` rather than holding a
@@ -19,14 +19,18 @@ behaviour is otherwise identical regardless of how the client is resolved.
 
 from __future__ import annotations
 
-import json
+import contextvars
+import logging
 import os
+import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Annotated, Any
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import quote
 
 import httpx
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BeforeValidator, Field
 from typing_extensions import NotRequired, TypedDict
@@ -37,16 +41,24 @@ from rapidata_mcp.uploads import UploadSessions, check_reference, is_http_url
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
-    from rapidata import UploadedAsset
+    from rapidata import RapidataClient, UploadedAsset
     from rapidata.rapidata_client.job.rapidata_job import RapidataJob
     from rapidata.rapidata_client.job.rapidata_job_definition import (
         RapidataJobDefinition,
     )
-    from rapidata.rapidata_client.results.rapidata_results import RapidataResults
+
+logger = logging.getLogger(__name__)
 
 # The well-known id of the global audience — the broadest pool of labelers,
 # ready to work immediately with no targeting or qualification setup.
 _GLOBAL_AUDIENCE_ID = "global"
+
+FILTERS_RULE = (
+    "Filter by language only when people must understand speech in audio or video, "
+    "or text inside an image or video: the question, context and answer options are "
+    "already machine-translated into each person's language. Filter by country only "
+    "when the user wants the opinion of people in that country."
+)
 
 # Datapoint used when the caller creates a task without any media: a task still
 # needs at least one datapoint, so a generic question-mark image stands in and
@@ -67,8 +79,6 @@ _PENDING_STATES: dict[str, str] = {
     "StaleResults": "regenerating",
     "SpendLimited": "spend_limited",
 }
-# States from which a (partial or final) result file can be downloaded.
-_FINISHED_STATES = {"Completed", "Paused"}
 
 # Every tool reaches the Rapidata platform (an external service), the global
 # crowd of human annotators, and caller-supplied public media URLs — an open
@@ -77,6 +87,16 @@ _OPEN_WORLD = True
 
 _MAX_IMPORTS = 100
 _IMPORT_WORKERS = 8
+
+# The SDK prices a draft within about 5 s but polls for up to 5 minutes; a draft
+# waits at most this long and comes back without a price after it.
+_PRICE_TIMEOUT_S = 10.0
+_pricing = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pricing")
+
+_OUTDATED_TOOLS = (
+    "Your client is showing an outdated list of Rapidata tools. Ask the user to start "
+    "a new chat or refresh the Rapidata connector, then use the tools it lists."
+)
 
 _USE_REFERENCES = (
     "Pass the references to create_classification_task (datapoint_references) or "
@@ -125,8 +145,23 @@ class DraftResult(TypedDict):
     details_url: str
     runs_on: str
     total_responses: int
+    estimated_cost_usd: float | None
+    budget_left_usd: float | None
     confirmation_required: bool
     next_step: str
+
+
+class AccountBalance(TypedDict):
+    mode: Literal["prepaid", "limited", "usage"]
+    budget_left_usd: float | None
+    spent_this_period_usd: float
+    spend_limit_usd: float | None
+    owed_usd: float | None
+
+
+class Filters(TypedDict, total=False):
+    countries: list[str]
+    languages: list[str]
 
 
 class StartedJob(TypedDict):
@@ -134,12 +169,15 @@ class StartedJob(TypedDict):
     name: str
     status: str
     details_url: str
+    audience_id: str
+    audience: str
     started: bool
 
 
 class JobStatus(TypedDict):
     job_id: str
     status: str
+    completion_percentage: float
     details_url: str
 
 
@@ -222,35 +260,45 @@ def register_tools(
     def _definition(job_definition_id: str) -> RapidataJobDefinition:
         return _client().job.get_job_definition_by_id(job_definition_id)
 
-    def _download_results(job: RapidataJob) -> RapidataResults:
-        # Download the current result file directly rather than via
-        # job.get_results(), which blocks until the job reaches a terminal state
-        # (a paused job never would). The SDK exposes no non-blocking accessor.
-        from rapidata.rapidata_client.results.rapidata_results import RapidataResults
-
-        raw = job._openapi_service.order.job_api.job_job_id_download_results_get(
-            job_id=job.id
-        )
-        return RapidataResults(json.loads(raw))
-
     def _draft_result(
-        definition: RapidataJobDefinition, total_responses: int
+        client: RapidataClient,
+        definition: RapidataJobDefinition,
+        total_responses: int,
     ) -> DraftResult:
+        price = _pricing.submit(
+            contextvars.copy_context().run, _estimated_cost, definition
+        )
+        balance = _pricing.submit(
+            contextvars.copy_context().run, _account_balance, client
+        )
+        deadline = time.monotonic() + _PRICE_TIMEOUT_S
+        cost = _within(price, deadline)
+        account = _within(balance, deadline)
+        budget_left = account["budget_left_usd"] if account else None
+
+        cost_text = f"{total_responses} human responses"
+        if cost is not None:
+            cost_text += f" for about ${cost:.2f} (Rapidata's estimate)"
+        credit_text = ""
+        if budget_left is not None:
+            credit_text = f" The account has ${budget_left:.2f} left to spend."
         return {
             "job_definition_id": definition.id,
             "name": definition.name,
             "status": "draft",
             # Preview page for the definition before it runs.
             "details_url": definition._job_details_page,
-            "runs_on": "global audience",
+            "runs_on": "global audience unless start_job names another",
             "total_responses": total_responses,
+            "estimated_cost_usd": cost,
+            "budget_left_usd": budget_left,
             "confirmation_required": True,
             "next_step": (
                 "This job definition is a DRAFT and is NOT collecting responses "
-                f"yet. Starting it will collect {total_responses} human responses "
-                "on the global audience and spend money. Present this cost to the "
-                "user and ask whether to start collecting. Only after the user "
-                "confirms, call start_job with this job_definition_id."
+                f"yet. Starting it will collect {cost_text} and spend money."
+                f"{credit_text} Present this cost to the user and ask whether to "
+                "start collecting. Only after the user confirms, call start_job "
+                "with this job_definition_id."
             ),
         }
 
@@ -378,7 +426,12 @@ def register_tools(
 
         workers = min(len(sources), _IMPORT_WORKERS)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            assets = list(pool.map(import_one, sources))
+            # A context per import keeps its API calls inside this tool call's trace.
+            futures = [
+                pool.submit(contextvars.copy_context().run, import_one, source)
+                for source in sources
+            ]
+            assets = [future.result() for future in futures]
 
         failed = sum(1 for asset in assets if asset["error"] is not None)
         next_step = _USE_REFERENCES
@@ -504,6 +557,15 @@ def register_tools(
                 )
             ),
         ] = None,
+        keep_option_order: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Show answer_options in the given order instead of shuffling "
+                    "them per person. Use it for scales (1 to 5, bad to good)."
+                )
+            ),
+        ] = False,
     ) -> DraftResult:
         """Create a classification task where humans pick one answer option per item.
 
@@ -513,8 +575,7 @@ def register_tools(
 
         Creates a DRAFT job definition and does NOT start collecting responses (or
         spend): it returns ``confirmation_required`` and expects you to confirm the
-        cost with the user, then call ``start_job``. When run, the task goes to the
-        global audience (no targeting).
+        cost with the user, then call ``start_job``, which picks who answers.
         """
         datapoints: list[str | UploadedAsset] = (
             [
@@ -530,7 +591,10 @@ def register_tools(
                 "(same length as datapoint_references)"
             )
 
-        definition = _client().job.create_classification_job_definition(
+        from rapidata import NoShuffleSetting
+
+        client = _client()
+        definition = client.job.create_classification_job_definition(
             name=name,
             instruction=instruction,
             answer_options=answer_options,
@@ -538,8 +602,11 @@ def register_tools(
             responses_per_datapoint=responses_per_datapoint,
             contexts=contexts,
             confidence_threshold=confidence_threshold,
+            settings=[NoShuffleSetting()] if keep_option_order else None,
         )
-        return _draft_result(definition, len(datapoints) * responses_per_datapoint)
+        return _draft_result(
+            client, definition, len(datapoints) * responses_per_datapoint
+        )
 
     @mcp.tool(
         title="Create comparison task",
@@ -603,7 +670,7 @@ def register_tools(
         and only spends once you confirm the cost with the user and call
         ``start_job``. Each pair must hold exactly two asset references from
         ``upload_media`` (never URLs or paths), so (unlike classification) the
-        media is required. When run, it goes to the global audience.
+        media is required. ``start_job`` picks who answers.
         """
         if not comparison_pairs:
             raise ValueError("comparison_pairs must not be empty")
@@ -620,7 +687,8 @@ def register_tools(
             for i, pair in enumerate(comparison_pairs)
         ]
 
-        definition = _client().job.create_compare_job_definition(
+        client = _client()
+        definition = client.job.create_compare_job_definition(
             name=name,
             instruction=instruction,
             datapoints=pairs,
@@ -629,15 +697,15 @@ def register_tools(
             confidence_threshold=confidence_threshold,
         )
         return _draft_result(
-            definition, len(comparison_pairs) * responses_per_datapoint
+            client, definition, len(comparison_pairs) * responses_per_datapoint
         )
 
     @mcp.tool(
         title="Start job",
         annotations=ToolAnnotations(
             title="Start job",
-            # Runs the job on the global audience: begins collecting and spending,
-            # which is not reversible — flag it as the one destructive action.
+            # Begins collecting and spending, which is not reversible — flag it as
+            # the one destructive action.
             readOnlyHint=False,
             destructiveHint=True,
             idempotentHint=False,
@@ -653,20 +721,66 @@ def register_tools(
                 )
             ),
         ],
+        audience_id: Annotated[
+            str,
+            Field(
+                description=(
+                    'Who answers: "global" (everyone, ready at once), a curated '
+                    "audience's id, or the id of an audience the user built in the "
+                    "Rapidata dashboard."
+                )
+            ),
+        ] = _GLOBAL_AUDIENCE_ID,
+        filters: Annotated[
+            Filters | None,
+            Field(
+                description=(
+                    "Optional: narrow the audience to countries (ISO 3166-1 alpha-2, "
+                    'e.g. "DE") and/or languages (ISO 639-1, e.g. "de"). '
+                    + FILTERS_RULE
+                )
+            ),
+        ] = None,
     ) -> StartedJob:
-        """Start a draft job definition on the global audience. This step spends.
+        """Start a draft job definition on an audience. This step spends.
 
-        Runs the job definition created by ``create_*_task`` against the global
-        audience, which begins collecting responses and spending. Only call this
-        after confirming the task's cost (``total_responses``) with the user.
+        Runs the job definition created by ``create_*_task``, which begins
+        collecting responses and spending. Only call this after confirming the
+        task's cost (``estimated_cost_usd``, or ``total_responses`` when it is
+        null) with the user.
         """
-        audience = _client().audience.get_audience_by_id(_GLOBAL_AUDIENCE_ID)
-        job = audience.assign_job(_definition(job_definition_id))
+        client = _client()
+        audience_id = audience_id.strip() or _GLOBAL_AUDIENCE_ID
+        try:
+            audience = client.audience.get_audience_by_id(audience_id)
+        except Exception as e:
+            if getattr(e, "status_code", None) not in (400, 403, 404):
+                raise
+            raise ValueError(
+                f"Unknown audience {audience_id!r}. Use \"global\", a curated "
+                "audience's id or the id of an audience the user built in the "
+                "dashboard."
+            ) from e
+        if audience_id != _GLOBAL_AUDIENCE_ID:
+            _refuse_audience_that_never_answers(client, audience)
+
+        sdk_filters = _sdk_filters(filters or {})
+        target: Any = audience
+        if sdk_filters:
+            narrow = getattr(audience, "filter", None)
+            if narrow is None:
+                raise ValueError(
+                    f"Audience {audience_id!r} takes no filters; start it without."
+                )
+            target = narrow(sdk_filters)
+        job = target.assign_job(_definition(job_definition_id))
         return {
             "job_id": job.id,
             "name": job.name,
             "status": job.get_status(),
             "details_url": job.job_details_page,
+            "audience_id": target.id,
+            "audience": _describe_audience(audience.name, filters or {}),
             "started": True,
         }
 
@@ -685,17 +799,19 @@ def register_tools(
             str, Field(description="The job id returned by start_job.")
         ],
     ) -> JobStatus:
-        """Get a job's current platform state without fetching results.
+        """Get a job's current state and how far along it is, without results.
 
-        Returns ``job_id``, ``status`` (the platform state, e.g. ``Submitted``,
-        ``Running``, ``ManualApproval``, ``Completed``, ``Paused``, ``Failed``) and
-        ``details_url``, the job's page in the Rapidata dashboard. It carries no
-        progress percentage or responses; use ``get_job_results`` for those.
+        Returns ``status`` (the platform state, e.g. ``Submitted``, ``Running``,
+        ``ManualApproval``, ``Completed``, ``Paused``, ``Failed``),
+        ``completion_percentage`` (0 to 100) and ``details_url``, the job's page in
+        the Rapidata dashboard. Use ``get_job_results`` for the responses.
         """
         job = _job(job_id)
+        progress = job.get_progress()
         return {
             "job_id": job.id,
-            "status": job.get_status(),
+            "status": progress.state,
+            "completion_percentage": round(progress.completion_percentage, 1),
             "details_url": job.job_details_page,
         }
 
@@ -748,7 +864,7 @@ def register_tools(
                 "results": None,
             }
 
-        if status not in _FINISHED_STATES:
+        if status not in ("Completed", "Paused"):
             return {
                 "job_id": job.id,
                 "status": status,
@@ -757,7 +873,7 @@ def register_tools(
             }
 
         try:
-            results = _download_results(job)
+            results = job.get_results(preliminary_results=status == "Paused")
         except Exception as e:
             # A finished/paused job can briefly have no downloadable file while
             # the first responses are aggregated — surface as pollable, not error.
@@ -821,6 +937,27 @@ def register_tools(
         }
 
     @mcp.tool(
+        title="Get account balance",
+        annotations=ToolAnnotations(
+            title="Get account balance",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=_OPEN_WORLD,
+        ),
+    )
+    def get_account_balance() -> AccountBalance:
+        """How much the user's Rapidata account can still spend, in US dollars.
+
+        ``mode`` is ``prepaid`` (credit, e.g. the $20 every new account gets),
+        ``limited`` (billed for usage up to ``spend_limit_usd``) or ``usage``
+        (billed for usage). ``budget_left_usd`` is the credit left, or the room
+        under the spending cap; null means no cap. ``owed_usd`` is what ended
+        billing periods left unpaid.
+        """
+        return _account_balance(_client())
+
+    @mcp.tool(
         title="Pause job",
         annotations=ToolAnnotations(
             title="Pause job",
@@ -842,8 +979,163 @@ def register_tools(
             ),
         ],
     ) -> PausedJob:
-        """Pause a running job to stop collecting further responses (and spending)."""
-        job = _job(job_id)
-        # The SDK's RapidataJob has no public pause wrapper yet, so call the job API.
-        job._openapi_service.order.job_api.job_job_id_pause_post(job.id)
+        """Pause a running job to stop collecting further responses (and spending).
+
+        ``resume_job`` continues it."""
+        job = _job(job_id).pause()
         return {"job_id": job.id, "status": job.get_status(), "paused": True}
+
+    @mcp.tool(
+        title="Resume job",
+        annotations=ToolAnnotations(
+            title="Resume job",
+            # Spends again, but only what start_job already allowed.
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=_OPEN_WORLD,
+        ),
+    )
+    def resume_job(
+        job_id: Annotated[
+            str, Field(description="The job_id of a job pause_job paused.")
+        ],
+    ) -> PausedJob:
+        """Resume a paused job so it collects responses (and spends) again."""
+        job = _job(job_id)
+        status = job.get_status()
+        if status != "Paused":
+            raise ValueError(
+                f"Job {job.id} is {status}, not Paused; only a paused job resumes."
+            )
+        job.resume()
+        return {"job_id": job.id, "status": job.get_status(), "paused": False}
+
+    _reject_outdated_calls(mcp)
+
+
+def _reject_outdated_calls(mcp: FastMCP) -> None:
+    """Fail a call made from an older tool list instead of dropping the arguments it
+    no longer takes: a dropped media argument turns into the placeholder image."""
+    manager = mcp._tool_manager
+    call_tool = manager.call_tool
+
+    async def checked_call(name: str, arguments: dict[str, Any], *args, **kwargs):
+        tool = manager.get_tool(name)
+        if tool is None:
+            raise ToolError(f"Unknown tool: {name}. {_OUTDATED_TOOLS}")
+        unknown = sorted(set(arguments) - set(tool.parameters.get("properties", {})))
+        if unknown:
+            raise ToolError(f"{name} takes no {', '.join(unknown)}. {_OUTDATED_TOOLS}")
+        return await call_tool(name, arguments, *args, **kwargs)
+
+    manager.call_tool = checked_call
+
+
+def _within(future: Future[Any], deadline: float) -> Any:
+    """The future's result, or None when it fails or is not done by ``deadline``."""
+    try:
+        return future.result(timeout=max(deadline - time.monotonic(), 0.0))
+    except FutureTimeout:
+        return None
+    except Exception:
+        logger.warning("Could not price a draft", exc_info=True)
+        return None
+
+
+def _estimated_cost(definition: RapidataJobDefinition) -> float:
+    return round(definition.estimated_cost.estimated_cost, 2)
+
+
+def _account_balance(client: RapidataClient) -> AccountBalance:
+    # The billing summary, unlike the SDK's get_current_billing_period, also
+    # answers for an account that has no billing period yet.
+    summary = client._openapi_service.payment.billing_api.billing_summary_get()
+    mode = _BILLING_MODES.get(summary.mode.value, "usage")
+    spent = summary.current_period_usage
+    limit = summary.effective_limit
+    if mode == "prepaid":
+        left = summary.available_amount
+    elif limit is not None:
+        left = max(limit - spent, 0.0)
+    else:
+        left = None
+    try:
+        owed: float | None = client.billing.get_outstanding_balance()
+    except Exception:
+        logger.warning("Could not read the outstanding balance", exc_info=True)
+        owed = None
+    return {
+        "mode": mode,
+        "budget_left_usd": _cents(left),
+        "spent_this_period_usd": round(spent, 2),
+        "spend_limit_usd": _cents(limit),
+        "owed_usd": owed,
+    }
+
+
+_BILLING_MODES: dict[str, Literal["prepaid", "limited", "usage"]] = {
+    "Prepaid": "prepaid",
+    "Limited": "limited",
+    "Usage": "usage",
+}
+
+
+def _cents(amount: float | None) -> float | None:
+    return None if amount is None else round(amount, 2)
+
+
+def _sdk_filters(filters: Filters) -> list[Any]:
+    from rapidata import CountryFilter, LanguageFilter
+
+    countries = [c.strip().upper() for c in filters.get("countries") or []]
+    languages = [code.strip().lower() for code in filters.get("languages") or []]
+    sdk_filters: list[Any] = []
+    try:
+        if countries:
+            sdk_filters.append(CountryFilter(countries))
+        if languages:
+            sdk_filters.append(LanguageFilter(languages))
+    except ValueError as e:
+        raise ValueError(
+            "filters takes two-letter codes: countries as ISO 3166-1 alpha-2 "
+            f'("DE"), languages as ISO 639-1 ("de"). {e}'
+        ) from e
+    return sdk_filters
+
+
+def _describe_audience(name: str, filters: Filters) -> str:
+    parts = [
+        f"{key} {', '.join(codes)}"
+        for key, codes in (
+            ("countries", [c.strip().upper() for c in filters.get("countries") or []]),
+            ("languages", [c.strip().lower() for c in filters.get("languages") or []]),
+        )
+        if codes
+    ]
+    return f"{name}, filtered to {' and '.join(parts)}" if parts else name
+
+
+def _refuse_audience_that_never_answers(client: RapidataClient, audience: Any) -> None:
+    from rapidata.rapidata_client.audience._rapidata_unlisted_audience import (
+        UNLISTED_AUDIENCE_PREFIX,
+    )
+    from rapidata.rapidata_client.audience.recruiting import (
+        audience_will_never_produce_responses,
+    )
+
+    if audience.id.startswith(UNLISTED_AUDIENCE_PREFIX):
+        return
+    api = client._openapi_service.audience.audience_api
+    status = api.audience_audience_id_get(audience.id).status
+    metrics = audience.get_recruiting_metrics()
+    # A curated audience recruits nobody itself, so it reports an empty funnel.
+    funnel = (metrics.graduated, metrics.distilling, metrics.dropped, metrics.inactive)
+    if not any(funnel):
+        metrics = None
+    if audience_will_never_produce_responses(status, metrics):
+        raise ValueError(
+            f"Audience {audience.name!r} ({audience.id}) can never answer: nobody "
+            "has qualified and it is not recruiting. Ask the user to finish it in the "
+            'Rapidata dashboard, or start the job on "global".'
+        )

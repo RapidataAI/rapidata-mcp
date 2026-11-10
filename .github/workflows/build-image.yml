@@ -86,6 +86,7 @@ jobs:
           load: true
           build-args: |
             RAPIDATA_VERSION=${{ steps.sdk.outputs.version }}
+            RAPIDATA_MCP_IMAGE_TAG=${{ steps.tag.outputs.value }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

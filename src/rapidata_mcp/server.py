@@ -20,7 +20,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from importlib import resources
+from importlib import metadata, resources
 
 from mcp.server.auth.middleware.auth_context import (
     AuthContextMiddleware,
@@ -55,6 +55,11 @@ from rapidata_mcp.auth import (
     TokenClientProvider,
     TokenExchanger,
 )
+from rapidata_mcp.telemetry import (
+    configure_tracing,
+    trace_api_calls,
+    trace_tool_calls,
+)
 from rapidata_mcp.token_verifier import JWTVerifier
 from rapidata_mcp.tools import register_tools
 
@@ -81,9 +86,11 @@ _DEFAULT_SCOPES = [
 # up front, that these tools are only a slice of Rapidata and where to go for more.
 _INSTRUCTIONS = (
     "Rapidata runs human-in-the-loop labeling tasks. These tools are a small, "
-    "curated subset of the Rapidata platform: classification and comparison on the "
-    "global audience, created as a draft and run only after you confirm the cost "
-    "with the user (creating never spends; start_job does).\n\n"
+    "curated subset of the Rapidata platform: classification and comparison, created "
+    "as a draft that shows its price, and run only after you confirm the cost with "
+    "the user (creating never spends; start_job does). start_job runs on the global "
+    "audience, or on a curated or dashboard-built audience, optionally narrowed by "
+    "country or language.\n\n"
     "Media (images, video, audio) goes into a task as asset references, never as "
     "URLs or file paths: run it through upload_media first. Pass public URLs as "
     "urls, or files the user attached in ChatGPT as files. For local files, call "
@@ -96,8 +103,8 @@ _INSTRUCTIONS = (
     "Billing is pre-paid, pay-as-you-go for individual (non-organization) accounts, "
     "and new sign-ups get $20 in free credit — so trying these tools out is free.\n\n"
     "For anything beyond that — other task types (ranking, draw, locate, free text, "
-    "select words), curated or custom audiences and targeting filters (country, "
-    "language, age, device), benchmarks/leaderboards, or richer per-annotator "
+    "select words), building custom audiences, age, gender or device filters, "
+    "benchmarks/leaderboards, or richer per-annotator "
     "results — use the full Rapidata Python SDK directly instead of these tools. "
     "The easiest way is to install the official Rapidata skill, which teaches the "
     "agent to write Rapidata SDK code: in Claude Code run "
@@ -230,14 +237,12 @@ class _BrowserLandingApp:
         await self._app(scope, receive, send)
 
 
-class _ClientErrorLoggingApp:
-    """Logs request details when the transport answers 4xx.
+_TOOLS_LIST = re.compile(rb'"method"\s*:\s*"tools/list"')
 
-    Production sees a steady rate of 400s on POST /mcp whose cause the access
-    log can't show; this captures the offending request (key MCP headers and a
-    bounded body prefix) so they can be diagnosed. Sits inside the auth layer,
-    so expected 401s never reach it.
-    """
+
+class _RequestLoggingApp:
+    """Logs each tools/list's user agent, and the request when the transport answers
+    4xx; the access log shows neither. Inside the auth layer, so 401s never reach it."""
 
     def __init__(self, app, max_body: int = 2048) -> None:
         self._app = app
@@ -266,11 +271,13 @@ class _ClientErrorLoggingApp:
 
         await self._app(scope, recording_receive, recording_send)
 
-        if status and 400 <= status[0] < 500:
-            headers = {
-                key.decode("latin-1"): value.decode("latin-1")
-                for key, value in scope.get("headers", [])
-            }
+        headers = {
+            key.decode("latin-1"): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        if status and status[0] == 200 and _TOOLS_LIST.search(b"".join(body_parts)):
+            logger.info("tools/list from %s", headers.get("user-agent", "-"))
+        elif status and 400 <= status[0] < 500:
             relevant = {
                 name: headers[name]
                 for name in (
@@ -295,6 +302,16 @@ class _ClientErrorLoggingApp:
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _image_tag() -> str:
+    return os.environ.get("RAPIDATA_MCP_IMAGE_TAG", "").strip() or "dev"
+
+
+def server_version() -> str:
+    """The image tag this server was built as (``dev`` outside the image) and the
+    rapidata SDK it runs, e.g. ``sha-5f696e2 · rapidata 3.29.0``."""
+    return f"{_image_tag()} · rapidata {metadata.version('rapidata')}"
 
 
 @dataclass
@@ -414,9 +431,12 @@ def build_app(settings: Settings | None = None) -> Starlette:
     else:
         provider_factory = _token_provider_factory(settings)
 
+    version = server_version()
+    tracer_provider = configure_tracing(version)
+    trace_api_calls(f"rapidata-mcp/{_image_tag()}")
     mcp = FastMCP(
         "rapidata",
-        instructions=_INSTRUCTIONS,
+        instructions=f"{_INSTRUCTIONS}\n\nServer version: {version}.",
         website_url="https://docs.rapidata.ai/",
         icons=[
             Icon(
@@ -428,12 +448,15 @@ def build_app(settings: Settings | None = None) -> Starlette:
         stateless_http=True,
         json_response=True,
     )
+    # FastMCP takes no version, and without one serverInfo reports the mcp library's.
+    mcp._mcp_server.version = version
     register_tools(
         mcp,
         provider_factory,
         api_url=settings.api_url,
         public_url=settings.resource_url,
     )
+    trace_tool_calls(mcp)
 
     # Build the Streamable-HTTP transport directly so the OAuth shell below is
     # fully under our control (FastMCP couples advertised scopes to enforced
@@ -443,7 +466,7 @@ def build_app(settings: Settings | None = None) -> Starlette:
     session_manager = StreamableHTTPSessionManager(
         app=mcp._mcp_server, json_response=True, stateless=True
     )
-    streamable_asgi = _ClientErrorLoggingApp(StreamableHTTPASGIApp(session_manager))
+    streamable_asgi = _RequestLoggingApp(StreamableHTTPASGIApp(session_manager))
 
     # Advertise the canonical resource id, with the empty-path "/". A bare origin (no
     # path) isn't a canonical absolute URI, and the auth server (OpenIddict) rejects it
@@ -463,7 +486,7 @@ def build_app(settings: Settings | None = None) -> Starlette:
         return JSONResponse(metadata)
 
     async def health(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok", "version": version})
 
     async def landing(request: Request) -> HTMLResponse:
         return HTMLResponse(_OVERVIEW_HTML)
@@ -535,6 +558,8 @@ def build_app(settings: Settings | None = None) -> Starlette:
     async def lifespan(app: Starlette):
         async with session_manager.run():
             yield
+        if tracer_provider is not None:
+            tracer_provider.shutdown()
 
     return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 

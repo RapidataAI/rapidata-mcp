@@ -9,6 +9,8 @@ from urllib.parse import quote
 
 import httpx
 
+from rapidata_mcp.telemetry import traced_http_client
+
 # The asset service names every stored file "<guid><extension>"; that is the reference.
 # Processing can rewrite the extension (.webp, GIF to video), so any extension passes.
 _GUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32}"
@@ -33,7 +35,9 @@ def check_reference(value: str, where: str) -> str:
     if is_http_url(reference):
         raise ValueError(
             f"{where} is a URL ({shown!r}), not an asset reference. Import it with "
-            "upload_media(urls=[...]) and pass the reference it returns."
+            "upload_media(urls=[...]) and pass the reference it returns. If you have "
+            "no upload_media tool, your client is showing an outdated tool list: ask "
+            "the user to start a new chat or refresh the Rapidata connector."
         )
     raise ValueError(
         f"{where} ({shown!r}) is not an asset reference. For a local file, call "
@@ -51,7 +55,7 @@ class UploadSessions:
 
     def __init__(self, api_url: str, http: httpx.Client | None = None) -> None:
         self.api_url = api_url.rstrip("/")
-        self._http = http or httpx.Client(timeout=30.0)
+        self._http = http or traced_http_client(timeout=30.0)
 
     def create(self, token: str) -> dict[str, Any]:
         return _json(self._send("POST", "/asset/upload-session", token))

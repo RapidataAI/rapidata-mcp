@@ -12,19 +12,20 @@ Public endpoint: **`https://mcp.rapidata.ai/mcp`**
 
 ## Tools
 
-Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (a draft template), and `start_job` runs that definition on the **global audience**, producing a **job** you then poll and read.
+Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (a draft template), and `start_job` runs that definition on an **audience** (global unless it names another), producing a **job** you then poll and read.
 
 | Tool | Purpose |
 |---|---|
 | `upload_media` | Turn media into **asset references**: imports public URLs or ChatGPT attachments, or opens an upload link for local files. **No spend.** |
 | `list_uploads` | The references of the files uploaded to an upload link. |
-| `create_classification_task` | Humans pick one option per item. Creates a draft job definition — **no spend**. |
-| `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition — **no spend**. |
-| `start_job` | Run a draft job definition on the global audience — **the single step that spends.** |
-| `get_job_status` | Current status of a job. |
+| `create_classification_task` | Humans pick one option per item. Creates a draft job definition with its dollar estimate and the credit left — **no spend**. `keep_option_order` stops shuffling the options (for scales). |
+| `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition with its dollar estimate and the credit left — **no spend**. |
+| `start_job` | Run a draft job definition — **the single step that spends.** `audience_id` (default `global`, or a curated or dashboard-built audience) and optional `filters` (countries, languages). |
+| `get_job_status` | Status and percent done. |
 | `get_job_results` | Partial once paused, final once complete; **never blocks.** |
 | `list_jobs` | Your most recent jobs. |
-| `pause_job` | Stop collecting (and spending). |
+| `pause_job` / `resume_job` | Stop collecting (and spending), and continue. |
+| `get_account_balance` | Credit left, spend this period, spending cap, amount owed. |
 
 Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
 
@@ -67,13 +68,13 @@ Two invariants hold across the tool layer:
 ## Beyond these tools: the full SDK
 
 These MCP tools are a deliberately small, safe slice — classification and comparison on the
-global audience. The [Rapidata Python SDK](https://docs.rapidata.ai/) (`rapidata`) is far more
+global, a curated or a dashboard-built audience, narrowed by country or language. The [Rapidata Python SDK](https://docs.rapidata.ai/) (`rapidata`) is far more
 powerful and is the right tool once you outgrow the two task types here:
 
 - **Every task type** — ranking, draw, locate, free text, select words, timestamp (not just
   classify/compare).
-- **Curated & custom audiences** — train annotators on qualification examples, and target by
-  country, language, age, device, and more.
+- **Building custom audiences** — train annotators on qualification examples, and target by
+  age, gender, device, and more.
 - **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **confidence stopping**.
 - **Richer results** — per-annotator reliability (`userScore`), demographics, and
   `to_pandas()` / `to_json()` helpers.
@@ -176,6 +177,23 @@ npx @modelcontextprotocol/inspector
 Enter the URL `https://mcp.rapidata.ai/mcp`, transport **Streamable HTTP**, and complete the OAuth
 prompt.
 
+### Getting new tools after an update
+
+Clients cache the tool list, and this server cannot tell them it changed: it is stateless, so
+it never sends `notifications/tools/list_changed`. An existing connection picks up new or changed
+tools only when its client reads the list again:
+
+| Client | How to get the new tools |
+|---|---|
+| Claude (web, desktop and mobile apps) | Start a new chat about an hour after the update. If the tools are still missing, use **Refresh tools list** on the connector, or **Disconnect** and connect again. As a last resort, remove the connector and add it again as `https://mcp.rapidata.ai/mcp?v=2`; any new query string works, and you sign in again. |
+| Claude Code | Start a new session, or run `/mcp` and select **Reconnect**. |
+| ChatGPT | Published app: OpenAI rescans the server daily, and new tools appear once they pass its automated checks. Custom connection: open it under **Plugins**, select **Refresh**, then start a new conversation. |
+| Codex (ChatGPT apps) | Start a new session or run `/apps`. Codex offers the tools that ChatGPT has. |
+| Cursor | Quit Cursor completely and reopen it, or remove the server and add it again. |
+
+`curl https://mcp.rapidata.ai/health` shows the version that is live. Agents that read the server
+instructions, such as Claude Code, also get it on the last line of those instructions.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -190,6 +208,8 @@ prompt.
 | `RAPIDATA_ENVIRONMENT` | _(SDK default)_ | Rapidata SDK environment to target. |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address. |
 | `LOG_LEVEL` | `INFO` | Logging level. |
+| `RAPIDATA_MCP_IMAGE_TAG` | _(unset → `dev`)_ | Set by the image build to the tag it pushes. The server reports it, with the rapidata SDK version, as its version. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset → no export)_ | OTLP/gRPC collector for the traces: one span per tool call (service `rapidata-mcp-service`), a child span per API call, continued by the backend. |
 | `RAPIDATA_MCP_AUTH_DISABLED` | _(unset)_ | **Local dev only.** Serve without auth using ambient SDK credentials (`RAPIDATA_CLIENT_ID` / `RAPIDATA_CLIENT_SECRET`). |
 
 ## Endpoints
@@ -199,7 +219,7 @@ prompt.
 | `POST/GET/DELETE /mcp` | Bearer JWT | The MCP Streamable-HTTP endpoint. |
 | `GET /.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata. |
 | `GET /upload/{id}` | none (the page's uploads carry the link's upload token) | Static page that uploads dropped files to an `upload_media` link. |
-| `GET /health` | none | Liveness/readiness probe → `{"status":"ok"}`. |
+| `GET /health` | none | Liveness/readiness probe → `{"status":"ok","version":"sha-5f696e2 · rapidata 3.29.0"}`. |
 
 The upload sessions themselves live on the Rapidata API, not here: `POST /asset/upload-session`
 and `GET /asset/upload-session/{id}/files` (called by the tools with the exchanged API token), and
@@ -240,6 +260,16 @@ whichever was current when it was built. `--build-arg RAPIDATA_VERSION=3.19.2` p
 exact one instead; the SDK's release workflow passes it to rebuild this image on every
 stable SDK release, so the deployed server keeps tracking the SDK it wraps.
 
+`--build-arg RAPIDATA_MCP_IMAGE_TAG=sha-5f696e2` names the build; CI passes the tag it
+pushes. The server reports it with the installed SDK version, e.g.
+`sha-5f696e2 · rapidata 3.29.0`, in three places: `GET /health`, `serverInfo.version` in
+the `initialize` response, and the last line of the server instructions. Without the build
+arg it reports `dev`. To see what is deployed:
+
+```bash
+curl https://mcp.rapidata.ai/health
+```
+
 ## Architecture
 
 ```
@@ -263,11 +293,11 @@ client ──Bearer JWT──▶ /mcp ──▶ RequireAuth ─▶ FastMCP tools
 ## Scope (Stage 1)
 
 Media as asset references (from URLs, ChatGPT attachments or local files), classification +
-comparison only, the global audience (no targeting/filters), no validation sets / signals / flows /
+comparison only, existing audiences narrowed by country or language only, no validation sets / signals / flows /
 leaderboards. Those are later stages, and
 the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
 above). Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
-`start_job` assigns it to the global audience.
+`start_job` assigns it to the chosen audience.
 
 ## License
 
