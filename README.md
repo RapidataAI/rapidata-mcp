@@ -12,19 +12,20 @@ Public endpoint: **`https://mcp.rapidata.ai/mcp`**
 
 ## Tools
 
-Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (a draft template), and `start_job` runs that definition on the **global audience**, producing a **job** you then poll and read.
+Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (a draft template), and `start_job` runs that definition on an **audience** (global unless it names another), producing a **job** you then poll and read.
 
 | Tool | Purpose |
 |---|---|
 | `upload_media` | Turn media into **asset references**: imports public URLs or ChatGPT attachments, or opens an upload link for local files. **No spend.** |
 | `list_uploads` | The references of the files uploaded to an upload link. |
-| `create_classification_task` | Humans pick one option per item. Creates a draft job definition — **no spend**. |
-| `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition — **no spend**. |
-| `start_job` | Run a draft job definition on the global audience — **the single step that spends.** |
-| `get_job_status` | Current status of a job. |
+| `create_classification_task` | Humans pick one option per item. Creates a draft job definition with its dollar estimate and the credit left — **no spend**. `keep_option_order` stops shuffling the options (for scales). |
+| `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition with its dollar estimate and the credit left — **no spend**. |
+| `start_job` | Run a draft job definition — **the single step that spends.** `audience_id` (default `global`, or a curated or dashboard-built audience) and optional `filters` (countries, languages). |
+| `get_job_status` | Status and percent done. |
 | `get_job_results` | Partial once paused, final once complete; **never blocks.** |
 | `list_jobs` | Your most recent jobs. |
-| `pause_job` | Stop collecting (and spending). |
+| `pause_job` / `resume_job` | Stop collecting (and spending), and continue. |
+| `get_account_balance` | Credit left, spend this period, spending cap, amount owed. |
 
 Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
 
@@ -67,13 +68,13 @@ Two invariants hold across the tool layer:
 ## Beyond these tools: the full SDK
 
 These MCP tools are a deliberately small, safe slice — classification and comparison on the
-global audience. The [Rapidata Python SDK](https://docs.rapidata.ai/) (`rapidata`) is far more
+global, a curated or a dashboard-built audience, narrowed by country or language. The [Rapidata Python SDK](https://docs.rapidata.ai/) (`rapidata`) is far more
 powerful and is the right tool once you outgrow the two task types here:
 
 - **Every task type** — ranking, draw, locate, free text, select words, timestamp (not just
   classify/compare).
-- **Curated & custom audiences** — train annotators on qualification examples, and target by
-  country, language, age, device, and more.
+- **Building custom audiences** — train annotators on qualification examples, and target by
+  age, gender, device, and more.
 - **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **confidence stopping**.
 - **Richer results** — per-annotator reliability (`userScore`), demographics, and
   `to_pandas()` / `to_json()` helpers.
@@ -292,11 +293,11 @@ client ──Bearer JWT──▶ /mcp ──▶ RequireAuth ─▶ FastMCP tools
 ## Scope (Stage 1)
 
 Media as asset references (from URLs, ChatGPT attachments or local files), classification +
-comparison only, the global audience (no targeting/filters), no validation sets / signals / flows /
+comparison only, existing audiences narrowed by country or language only, no validation sets / signals / flows /
 leaderboards. Those are later stages, and
 the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
 above). Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
-`start_job` assigns it to the global audience.
+`start_job` assigns it to the chosen audience.
 
 ## License
 
