@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Protocol
 
 import httpx
 
+from rapidata_mcp.telemetry import traced_http_client
+
 if TYPE_CHECKING:
     from rapidata import RapidataClient
 
@@ -120,7 +122,7 @@ class TokenExchanger:
         self._api_resource = api_resource
         self._scope = scope
         self._skew = skew
-        self._http = http or httpx.Client(timeout=10.0)
+        self._http = http or traced_http_client(timeout=10.0)
         self._cache: dict[str, dict] = {}
         self._lock = threading.Lock()
 

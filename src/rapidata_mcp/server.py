@@ -55,6 +55,11 @@ from rapidata_mcp.auth import (
     TokenClientProvider,
     TokenExchanger,
 )
+from rapidata_mcp.telemetry import (
+    configure_tracing,
+    trace_api_calls,
+    trace_tool_calls,
+)
 from rapidata_mcp.token_verifier import JWTVerifier
 from rapidata_mcp.tools import register_tools
 
@@ -297,11 +302,14 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _image_tag() -> str:
+    return os.environ.get("RAPIDATA_MCP_IMAGE_TAG", "").strip() or "dev"
+
+
 def server_version() -> str:
     """The image tag this server was built as (``dev`` outside the image) and the
     rapidata SDK it runs, e.g. ``sha-5f696e2 · rapidata 3.29.0``."""
-    tag = os.environ.get("RAPIDATA_MCP_IMAGE_TAG", "").strip() or "dev"
-    return f"{tag} · rapidata {metadata.version('rapidata')}"
+    return f"{_image_tag()} · rapidata {metadata.version('rapidata')}"
 
 
 @dataclass
@@ -422,6 +430,8 @@ def build_app(settings: Settings | None = None) -> Starlette:
         provider_factory = _token_provider_factory(settings)
 
     version = server_version()
+    tracer_provider = configure_tracing(version)
+    trace_api_calls(f"rapidata-mcp/{_image_tag()}")
     mcp = FastMCP(
         "rapidata",
         instructions=f"{_INSTRUCTIONS}\n\nServer version: {version}.",
@@ -444,6 +454,7 @@ def build_app(settings: Settings | None = None) -> Starlette:
         api_url=settings.api_url,
         public_url=settings.resource_url,
     )
+    trace_tool_calls(mcp)
 
     # Build the Streamable-HTTP transport directly so the OAuth shell below is
     # fully under our control (FastMCP couples advertised scopes to enforced
@@ -545,6 +556,8 @@ def build_app(settings: Settings | None = None) -> Starlette:
     async def lifespan(app: Starlette):
         async with session_manager.run():
             yield
+        if tracer_provider is not None:
+            tracer_provider.shutdown()
 
     return Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
 
