@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -7,6 +8,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
+from rapidata_mcp import tools
 from rapidata_mcp.tools import register_tools
 
 API = "https://api.example.test"
@@ -26,21 +28,57 @@ class FakeAssets:
         return SimpleNamespace(name=f"ref-of-{asset.rsplit('/', 1)[-1]}")
 
 
+class FakeDefinition(SimpleNamespace):
+    pricing_delay = 0.0
+
+    @property
+    def estimated_cost(self) -> SimpleNamespace:
+        time.sleep(self.pricing_delay)
+        return SimpleNamespace(estimated_cost=0.3049)
+
+
 class FakeJobs:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    def _create(self, **kwargs: Any) -> SimpleNamespace:
+    def _create(self, **kwargs: Any) -> FakeDefinition:
         self.created.append(kwargs)
-        return SimpleNamespace(id="jd_1", name=kwargs["name"], _job_details_page="u")
+        return FakeDefinition(id="jd_1", name=kwargs["name"], _job_details_page="u")
 
     create_classification_job_definition = _create
     create_compare_job_definition = _create
 
 
+class FakeBilling:
+    def __init__(self) -> None:
+        self.summary = SimpleNamespace(
+            mode=SimpleNamespace(value="Prepaid"),
+            current_period_usage=0.3,
+            effective_limit=20.0,
+            available_amount=19.7,
+        )
+        self.owed: float | Exception = 0.0
+
+    def billing_summary_get(self) -> SimpleNamespace:
+        return self.summary
+
+    def get_outstanding_balance(self) -> float:
+        if isinstance(self.owed, Exception):
+            raise self.owed
+        return self.owed
+
+
 class FakeProvider:
     def __init__(self) -> None:
-        self.client = SimpleNamespace(asset=FakeAssets(), job=FakeJobs())
+        billing = FakeBilling()
+        self.client = SimpleNamespace(
+            asset=FakeAssets(),
+            job=FakeJobs(),
+            billing=billing,
+            _openapi_service=SimpleNamespace(
+                payment=SimpleNamespace(billing_api=billing)
+            ),
+        )
 
     def get_client(self) -> SimpleNamespace:
         return self.client
@@ -358,3 +396,70 @@ def test_a_url_where_a_reference_belongs_mentions_an_outdated_tool_list():
             instruction="i",
             comparison_pairs=[["https://example.test/a.png", REF_A]],
         )
+
+
+def _create_comparison(mcp: FastMCP) -> dict[str, Any]:
+    return _call(
+        mcp,
+        "create_comparison_task",
+        name="voice-overs",
+        instruction="Which voice-over sounds more natural?",
+        comparison_pairs=[[REF_A, REF_B]],
+        responses_per_datapoint=20,
+    )
+
+
+def test_a_draft_shows_its_price_and_the_credit_left():
+    mcp, _ = _server()
+
+    result = _create_comparison(mcp)
+
+    assert result["total_responses"] == 20
+    assert result["estimated_cost_usd"] == 0.3
+    assert result["budget_left_usd"] == 19.7
+    assert "for about $0.30" in result["next_step"]
+    assert "$19.70 left" in result["next_step"]
+
+
+def test_a_draft_comes_back_without_a_price_after_the_limit(monkeypatch):
+    monkeypatch.setattr(tools, "_PRICE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(FakeDefinition, "pricing_delay", 1.0)
+    mcp, _ = _server()
+
+    started = time.monotonic()
+    result = _create_comparison(mcp)
+
+    assert time.monotonic() - started < 0.9
+    assert result["estimated_cost_usd"] is None
+    assert result["budget_left_usd"] == 19.7
+    assert "about $" not in result["next_step"]
+
+
+def test_account_balance_for_a_new_prepaid_account():
+    mcp, _ = _server()
+
+    assert _call(mcp, "get_account_balance") == {
+        "mode": "prepaid",
+        "budget_left_usd": 19.7,
+        "spent_this_period_usd": 0.3,
+        "spend_limit_usd": 20.0,
+        "owed_usd": 0.0,
+    }
+
+
+def test_account_balance_under_a_spending_cap():
+    mcp, provider = _server()
+    provider.client.billing.summary = SimpleNamespace(
+        mode=SimpleNamespace(value="Limited"),
+        current_period_usage=120.456,
+        effective_limit=100.0,
+        available_amount=None,
+    )
+    provider.client.billing.owed = RuntimeError("no invoices yet")
+
+    result = _call(mcp, "get_account_balance")
+
+    assert result["mode"] == "limited"
+    assert result["budget_left_usd"] == 0.0
+    assert result["spent_this_period_usd"] == 120.46
+    assert result["owed_usd"] is None
