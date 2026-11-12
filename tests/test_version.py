@@ -6,12 +6,12 @@ from starlette.testclient import TestClient
 from rapidata_mcp.server import Settings, build_app, server_version
 
 SDK = metadata.version("rapidata")
-VERSION = f"sha-5f696e2 · rapidata {SDK}"
+VERSION = f"2026.11.12.1640-0a5dfdf · rapidata {SDK}"
 
 
 @pytest.fixture
 def image_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RAPIDATA_MCP_IMAGE_TAG", "sha-5f696e2")
+    monkeypatch.setenv("RAPIDATA_MCP_IMAGE_TAG", "2026.11.12.1640-0a5dfdf")
 
 
 def test_version_is_the_image_tag_and_the_sdk(image_tag):
