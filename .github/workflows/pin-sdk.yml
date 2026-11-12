@@ -1,0 +1,188 @@
+name: Pin released SDK
+
+# The SDK's release workflow fires sdk-released on every stable rapidata release. The pin
+# lands on main as a merged PR, so build-image.yml versions and deploys it like any commit.
+on:
+  repository_dispatch:
+    types: [sdk-released]
+  workflow_dispatch:
+    inputs:
+      sdk_version:
+        description: "rapidata SDK version to pin, e.g. 3.30.0"
+        required: true
+        type: string
+
+concurrency:
+  group: pin-sdk
+  cancel-in-progress: false
+
+env:
+  SDK_VERSION: ${{ github.event.client_payload.sdk_version || inputs.sdk_version }}
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Validate the version
+        run: |
+          if ! [[ "$SDK_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error ::not a stable version: '$SDK_VERSION'"
+            exit 1
+          fi
+
+      # Pushes and merges made with GITHUB_TOKEN trigger no workflows, so the merge would
+      # never reach build-image.yml.
+      - name: Create app token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RAPIDATA_OPENAPI_GENERATOR_APP_ID }}
+          private-key: ${{ secrets.RAPIDATA_OPENAPI_GENERATOR_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ steps.token.outputs.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pin and lock
+        id: pin
+        run: |
+          current=$(grep -oP '"rapidata==\K[^"]+' pyproject.toml)
+          newest=$(printf '%s\n' "$current" "$SDK_VERSION" | sort -V | tail -n1)
+          if [ "$SDK_VERSION" = "$current" ] || [ "$newest" != "$SDK_VERSION" ]; then
+            echo "::notice ::rapidata $current is pinned; not moving it to $SDK_VERSION"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sed -i -E "s/\"rapidata==[^\"]+\"/\"rapidata==$SDK_VERSION\"/" pyproject.toml
+          # The release dispatches right after the PyPI upload, which the index can lag.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            uv lock --refresh-package rapidata && break
+            [ "$attempt" -lt 10 ] || exit 1
+            sleep 30
+          done
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open the PR
+        id: pr
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          branch="build(deps)/pin-rapidata-$SDK_VERSION"
+          title="build(deps): pin rapidata $SDK_VERSION"
+          git config user.name "Rudolf the Rabbit"
+          git config user.email "login@rapidata.ai"
+          git switch -c "$branch"
+          git commit -am "$title"
+          git push --force origin "$branch"
+          number=$(gh api "repos/$GITHUB_REPOSITORY/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=open" --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            number=$(gh api "repos/$GITHUB_REPOSITORY/pulls" \
+              -f title="$title" -f head="$branch" -f base=main \
+              -f body="Pins the rapidata SDK released as $SDK_VERSION. Merged by [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) once the smoke test passes." \
+              --jq .number)
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Lint, test, type-check
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          uv sync --locked --group dev
+          uv run ruff check src tests
+          uv run pytest
+          uv run pyright
+
+      - name: Smoke-test the image
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          docker build -t rapidata-mcp:pin .
+          docker run --rm --entrypoint python rapidata-mcp:pin \
+            -c 'import rapidata_mcp; rapidata_mcp.build_app(rapidata_mcp.Settings(auth_disabled=True))'
+
+      - name: Merge
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          TITLE: ${{ steps.pr.outputs.title }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/merge" \
+            -f merge_method=squash -f commit_title="$TITLE (#$NUMBER)"
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH"
+
+      - name: Leave the PR for a human
+        if: failure() && steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="Not merged: [the gate failed]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) on rapidata $SDK_VERSION, so prod stays on the previous pin."
+
+  # Reports SDK functions sdk_coverage.toml doesn't classify as an issue; a separate job,
+  # so it never blocks the pin.
+  sdk-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Validate the version
+        run: |
+          if ! [[ "$SDK_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error ::not a stable version: '$SDK_VERSION'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the released SDK
+        run: |
+          sed -i -E "s/\"rapidata==[^\"]+\"/\"rapidata==$SDK_VERSION\"/" pyproject.toml
+          uv venv
+          uv pip install . "rapidata==$SDK_VERSION"
+
+      - name: Compare with sdk_coverage.toml
+        id: check
+        run: |
+          set +e
+          .venv/bin/python -m rapidata_mcp.coverage sdk_coverage.toml > coverage.md
+          code=$?
+          set -e
+          # Exit 1 with a body is drift; anything else non-zero is a crash.
+          if [ "$code" -eq 1 ] && [ -s coverage.md ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+
+      - name: Open an issue
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="rapidata $SDK_VERSION: SDK functions the MCP has not classified"
+          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq length)
+          if [ "$open" -eq 0 ]; then
+            gh issue create --title "$title" --body-file coverage.md
+          fi

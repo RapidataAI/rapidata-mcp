@@ -1,36 +1,67 @@
 name: Build and push image
 
-# Builds + pushes the container image on merge to main and on every stable rapidata
-# SDK release, then triggers a prod deploy by bumping the image tag in the
-# infrastructure repo (ArgoCD auto-syncs). The infra `update-images.yml` workflow
-# already handles the `rapidata-mcp` type.
 on:
   push:
     branches: [main]
-  # The SDK's release workflow fires this on every stable rapidata release, so the
-  # deployed server never drifts behind the SDK it wraps: the image resolves the SDK
-  # at build time, so without a rebuild it keeps serving whatever version was current
-  # when this repo last changed.
-  repository_dispatch:
-    types: [sdk-released]
-  workflow_dispatch:
-    inputs:
-      rapidata_version:
-        description: "rapidata SDK version to pin (blank = latest on PyPI)"
-        required: false
-        type: string
+
+# The infrastructure dispatch is last-write-wins, so deploys finish in push order.
+concurrency:
+  group: push-main-deploy
+  cancel-in-progress: false
 
 env:
   REGION: europe-west4
   GAR_LOCATION: europe-west4-docker.pkg.dev/${{ secrets.GCP_COMMON_PROJECT_ID }}/rapidata-internal
 
 jobs:
+  create_version:
+    name: Create new version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.versioning.outputs.NEW_TAG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calculate next version
+        id: versioning
+        run: |
+          TIMESTAMP=$(date -u +'%Y.%m.%d.%H%M')
+          GIT_HASH=$(git rev-parse --short HEAD)
+          NEW_TAG="${TIMESTAMP}-${GIT_HASH}"
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "::notice ::New version: $NEW_TAG"
+
+      - name: Push tag
+        uses: actions/github-script@v8
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/${{ steps.versioning.outputs.NEW_TAG }}',
+              sha: context.sha
+            }).catch(err => {
+              if (err.status !== 422) throw err;
+              github.rest.git.updateRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/${{ steps.versioning.outputs.NEW_TAG }}',
+                sha: context.sha
+              });
+            });
+
   build-and-push:
+    needs: [create_version]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
+    env:
+      VERSION: ${{ needs.create_version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,65 +83,36 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Resolve rapidata SDK version
-        id: sdk
-        run: |
-          echo "version=${{ github.event.client_payload.sdk_version || inputs.rapidata_version }}" >> "$GITHUB_OUTPUT"
-
-      - name: Compute image tag
-        id: tag
-        env:
-          SDK_VERSION: ${{ steps.sdk.outputs.version }}
-        run: |
-          tag="sha-$(echo "${{ github.sha }}" | cut -c1-7)"
-          # An SDK-triggered rebuild runs on an unchanged commit, so the commit-only
-          # tag would collide with the existing image and leave ArgoCD nothing to sync.
-          if [ -n "$SDK_VERSION" ]; then
-            tag="$tag-sdk-$SDK_VERSION"
-          fi
-          echo "value=$tag" >> "$GITHUB_OUTPUT"
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp
-          tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.tag.outputs.value }}
+          tags: type=raw,value=${{ env.VERSION }}
 
       - name: Build
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
-          build-args: |
-            RAPIDATA_VERSION=${{ steps.sdk.outputs.version }}
-            RAPIDATA_MCP_IMAGE_TAG=${{ steps.tag.outputs.value }}
+          build-args: RAPIDATA_MCP_IMAGE_TAG=${{ env.VERSION }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # An SDK-triggered rebuild deploys with no PR and no CI run behind it, and the
-      # image resolves its dependencies at build time — so prove the server still
-      # imports and builds its app here, before anything reaches the registry.
       - name: Smoke-test the image
         run: |
           docker run --rm --entrypoint python \
-            "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp:${{ steps.tag.outputs.value }}" \
+            "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp:${{ env.VERSION }}" \
             -c 'import rapidata_mcp; rapidata_mcp.build_app(rapidata_mcp.Settings(auth_disabled=True))'
 
       - name: Push
-        run: docker push --all-tags "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp"
+        run: docker push "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp:${{ env.VERSION }}"
 
-      # Auto-deploy: point the prod overlay at the image just built, so ArgoCD
-      # (automated sync on services/rapidata-mcp) rolls the deployment. Mirrors the
-      # backend's deploy flow (repository_dispatch -> infrastructure update-images.yml,
-      # which already handles the `rapidata-mcp` type). The image must exist first, so
-      # this runs after the push.
+      # ArgoCD auto-syncs services/rapidata-mcp once infrastructure's update-images.yml
+      # commits the new tag into the overlay.
       - name: Create infrastructure app token
-        if: github.ref == 'refs/heads/main'
         uses: actions/create-github-app-token@v3
         id: infra-token
         with:
@@ -119,63 +121,24 @@ jobs:
           owner: RapidataAI
           repositories: infrastructure
 
-      - name: Deploy — bump prod image tag
-        if: github.ref == 'refs/heads/main'
+      - name: Deploy — bump test image tag
         uses: octokit/request-action@v3.0.0
         with:
           route: POST /repos/{owner}/{repo}/dispatches
           owner: RapidataAI
           repo: infrastructure
           event_type: update-image-tags
-          client_payload: '{"tag": "${{ steps.tag.outputs.value }}", "type": "rapidata-mcp", "overlay": "prod"}'
+          client_payload: '{"tag": "${{ env.VERSION }}", "type": "rapidata-mcp", "overlay": "test"}'
         env:
           GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}
 
-  # Reports SDK functions sdk_coverage.toml doesn't classify as an issue; a separate
-  # job, so it never blocks the deploy above.
-  sdk-coverage:
-    if: github.event_name == 'repository_dispatch' || inputs.rapidata_version != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
-    env:
-      SDK_VERSION: ${{ github.event.client_payload.sdk_version || inputs.rapidata_version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Deploy — bump prod image tag
+        uses: octokit/request-action@v3.0.0
         with:
-          python-version: "3.12"
-
-      - name: Install the released SDK
-        run: |
-          uv venv
-          uv pip install . "rapidata==$SDK_VERSION"
-
-      - name: Compare with sdk_coverage.toml
-        id: check
-        run: |
-          set +e
-          .venv/bin/python -m rapidata_mcp.coverage sdk_coverage.toml > coverage.md
-          code=$?
-          set -e
-          # Exit 1 with a body is drift; anything else non-zero is a crash.
-          if [ "$code" -eq 1 ] && [ -s coverage.md ]; then
-            echo "drift=true" >> "$GITHUB_OUTPUT"
-          elif [ "$code" -ne 0 ]; then
-            exit "$code"
-          fi
-
-      - name: Open an issue
-        if: steps.check.outputs.drift == 'true'
+          route: POST /repos/{owner}/{repo}/dispatches
+          owner: RapidataAI
+          repo: infrastructure
+          event_type: update-image-tags
+          client_payload: '{"tag": "${{ env.VERSION }}", "type": "rapidata-mcp", "overlay": "prod"}'
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          title="rapidata $SDK_VERSION: SDK functions the MCP has not classified"
-          open=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq length)
-          if [ "$open" -eq 0 ]; then
-            gh issue create --title "$title" --body-file coverage.md
-          fi
+          GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}
