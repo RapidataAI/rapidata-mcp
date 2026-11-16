@@ -34,7 +34,7 @@ How many responses a task collects follows the SDK's stopping rules:
 | Tool | Default | Options |
 |---|---|---|
 | `create_comparison_task` | Adaptive stopping (`AdaptiveStopping()`): each pair collects until its result is clear, about 21 responses on average (7 for a clear pair, around 31 for a close one), capped at 100. | `responses_per_datapoint` for exactly that many per pair. |
-| `create_classification_task` | 10 responses per item. | `quorum` (a question with one correct answer): an item stops once that many agree, with `responses_per_datapoint` as the cap (`QuorumStopping`). |
+| `create_classification_task` | 10 responses per item. | `responses_per_datapoint` for another fixed count, at least 10. |
 
 ### Setup review before the draft
 
@@ -97,7 +97,7 @@ powerful and is the right tool once you outgrow the two task types here:
 - **Building custom audiences** — train annotators on qualification examples, and target by
   age, gender, device, and more.
 - **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **tuned stopping rules**
-  (`AdaptiveStopping` parameters, quorum on comparisons).
+  (`AdaptiveStopping` parameters, `QuorumStopping`).
 - **Richer results** — per-annotator reliability (`userScore`), demographics, and
   `to_pandas()` / `to_json()` helpers.
 

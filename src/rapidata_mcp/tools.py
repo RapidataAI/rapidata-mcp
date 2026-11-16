@@ -41,7 +41,7 @@ from rapidata_mcp.uploads import UploadSessions, check_reference, is_http_url
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
-    from rapidata import AdaptiveStopping, QuorumStopping, RapidataClient, UploadedAsset
+    from rapidata import AdaptiveStopping, RapidataClient, UploadedAsset
     from rapidata.rapidata_client.job.rapidata_job import RapidataJob
     from rapidata.rapidata_client.job.rapidata_job_definition import (
         RapidataJobDefinition,
@@ -299,7 +299,7 @@ def register_tools(
         client: RapidataClient,
         definition: RapidataJobDefinition,
         total_responses: int,
-        stopping: int | AdaptiveStopping | QuorumStopping,
+        stopping: int | AdaptiveStopping,
         check: FeedbackCheck,
         feedback: list[TaskFeedback],
     ) -> DraftResult:
@@ -581,8 +581,7 @@ def register_tools(
             Field(
                 description=(
                     "Human responses to collect per item, at least 10: with fewer, "
-                    "one misread answer can flip a result. With quorum, the most an "
-                    "item collects."
+                    "one misread answer can flip a result."
                 )
             ),
         ] = 10,
@@ -592,17 +591,6 @@ def register_tools(
                 description=(
                     "Optional per-datapoint text shown alongside the instruction. "
                     "If given, must have one entry per datapoint."
-                )
-            ),
-        ] = None,
-        quorum: Annotated[
-            int | None,
-            Field(
-                description=(
-                    "Only for a question with one correct answer: stop an item once "
-                    "this many responses pick the same option (e.g. 7, with "
-                    "responses_per_datapoint 10 as the cap). Omit it to collect "
-                    "responses_per_datapoint for every item."
                 )
             ),
         ] = None,
@@ -644,13 +632,8 @@ def register_tools(
                 "(same length as datapoint_references)"
             )
 
-        from rapidata import NoShuffleSetting, QuorumStopping
+        from rapidata import NoShuffleSetting
 
-        stopping: int | QuorumStopping = (
-            QuorumStopping(threshold=quorum, max_responses=responses_per_datapoint)
-            if quorum is not None
-            else responses_per_datapoint
-        )
         provider = provider_factory()
         client = provider.get_client()
         total_responses = len(datapoints) * responses_per_datapoint
@@ -671,12 +654,17 @@ def register_tools(
             instruction=instruction,
             answer_options=answer_options,
             datapoints=datapoints,
-            responses_per_datapoint=stopping,
+            responses_per_datapoint=responses_per_datapoint,
             contexts=contexts,
             settings=[NoShuffleSetting()] if keep_option_order else None,
         )
         return _draft_result(
-            client, definition, total_responses, stopping, check, feedback
+            client,
+            definition,
+            total_responses,
+            responses_per_datapoint,
+            check,
+            feedback,
         )
 
     @mcp.tool(
@@ -1188,19 +1176,17 @@ def _review(client: RapidataClient, setup: dict[str, Any]) -> Any:
         )
 
 
-def _max_responses(stopping: int | AdaptiveStopping | QuorumStopping) -> int:
+def _max_responses(stopping: int | AdaptiveStopping) -> int:
     if isinstance(stopping, int):
         return stopping
     return stopping.max_responses or _ADAPTIVE_MAX_RESPONSES
 
 
 def _collection_text(
-    stopping: int | AdaptiveStopping | QuorumStopping,
+    stopping: int | AdaptiveStopping,
     total_responses: int,
     cost: float | None,
 ) -> str:
-    from rapidata import QuorumStopping
-
     estimate = None if cost is None else f"about ${cost:.2f}"
     if isinstance(stopping, int):
         price = f" for {estimate} (Rapidata's estimate)" if estimate else ""
@@ -1208,14 +1194,6 @@ def _collection_text(
             f"Starting it will collect {total_responses} human responses{price} "
             "and spend money."
         )
-    if isinstance(stopping, QuorumStopping):
-        text = (
-            f"Starting it will collect up to {total_responses} human responses, as "
-            f"an item stops once {stopping.threshold} agree, and spend money."
-        )
-        if estimate:
-            text += f" Rapidata's estimate of {estimate} counts all {total_responses}."
-        return text
     cap = _max_responses(stopping)
     text = (
         "Starting it will collect responses until each pair's result is clear "
