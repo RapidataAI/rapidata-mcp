@@ -138,3 +138,27 @@ def test_sdk_api_calls_carry_the_trace_and_the_client(spans, monkeypatch):
     assert sent == [
         {"X-Client": "rapidata-mcp/sha-1234567", "traceparent": _traceparent(api)}
     ]
+
+
+def test_a_draft_call_records_the_setup_review(spans):
+    mcp = FastMCP("test")
+
+    @mcp.tool()
+    def create_comparison_task(force: bool = False) -> dict[str, Any]:
+        return {
+            "job_definition_id": "",
+            "created": False,
+            "feedback_check": "flagged",
+            "feedback": [{"kind": "unclear", "message": "m", "datapoint_index": None}],
+        }
+
+    trace_tool_calls(mcp)
+    asyncio.run(mcp.call_tool("create_comparison_task", {"force": True}))
+
+    (tool,) = spans()
+    attributes = dict(tool.attributes or {})
+    assert attributes["rapidata.task_feedback.force"] is True
+    assert attributes["rapidata.task_feedback.check"] == "flagged"
+    assert attributes["rapidata.task_feedback.created"] is False
+    assert list(attributes["rapidata.task_feedback.kinds"]) == ["unclear"]
+    assert "rapidata.job_definition_id" not in attributes

@@ -171,6 +171,65 @@ def _form(request: httpx.Request) -> dict[str, str]:
     return {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
 
 
+def _scoped_exchanger() -> TokenExchanger:
+    return TokenExchanger(
+        ISSUER,
+        "rapidata-mcp-server",
+        API_RESOURCE,
+        client_secret="s3cret",
+        scope="api job:task-feedback",
+        fallback_scope="api",
+    )
+
+
+@respx.mock
+def test_a_sign_in_without_the_extra_scope_falls_back_to_api(clock, api_clients):
+    def token_endpoint(request: httpx.Request) -> httpx.Response:
+        if _form(request)["scope"] != "api":
+            return httpx.Response(
+                400, json={"error": "invalid_scope", "error_description": "ID2051"}
+            )
+        return httpx.Response(
+            200,
+            json={"access_token": "api-1", "expires_in": 3600, "scope": "api"},
+        )
+
+    route = respx.post(TOKEN_ENDPOINT).mock(side_effect=token_endpoint)
+    provider = ExchangedTokenProvider(_scoped_exchanger(), MCP_TOKEN)
+
+    provider.get_client()
+
+    assert [_form(c.request)["scope"] for c in route.calls] == [
+        "api job:task-feedback",
+        "api",
+    ]
+    assert api_clients[0]["token"] == {
+        "access_token": "api-1",
+        "token_type": "Bearer",
+        "expires_at": int(clock.now + 3600),
+    }
+    assert not provider.grants("job:task-feedback")
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("returned", "granted"),
+    [("api job:task-feedback", True), ("api", False), (None, True)],
+)
+@respx.mock
+def test_the_exchange_reports_the_scopes_it_granted(
+    clock, api_clients, returned, granted
+):
+    body = {"access_token": "api-1", "expires_in": 3600}
+    if returned is not None:
+        body["scope"] = returned
+    respx.post(TOKEN_ENDPOINT).mock(return_value=httpx.Response(200, json=body))
+    provider = ExchangedTokenProvider(_scoped_exchanger(), MCP_TOKEN)
+
+    assert provider.grants("job:task-feedback") is granted
+    assert not provider.grants("job")
+
+
 @respx.mock
 def test_assertion_file_replaces_the_secret(tmp_path, clock, api_clients):
     assertion = tmp_path / "token"

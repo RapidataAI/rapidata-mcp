@@ -18,8 +18,8 @@ Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (
 |---|---|
 | `upload_media` | Turn media into **asset references**: imports public URLs or ChatGPT attachments, or opens an upload link for local files. **No spend.** |
 | `list_uploads` | The references of the files uploaded to an upload link. |
-| `create_classification_task` | Humans pick one option per item. Creates a draft job definition with its dollar estimate and the credit left — **no spend**. `keep_option_order` stops shuffling the options (for scales). |
-| `create_comparison_task` | Pairwise comparison (choose between two). Creates a draft job definition with its dollar estimate and the credit left — **no spend**. |
+| `create_classification_task` | Humans pick one option per item. Once the setup review passes, creates a draft job definition with its dollar estimate and the credit left — **no spend**. `keep_option_order` stops shuffling the options (for scales). |
+| `create_comparison_task` | Pairwise comparison (choose between two). Once the setup review passes, creates a draft job definition with its dollar estimate and the credit left — **no spend**. |
 | `start_job` | Run a draft job definition — **the single step that spends.** `audience_id` (default `global`, or a curated or dashboard-built audience) and optional `filters` (countries, languages). |
 | `get_job_status` | Status and percent done. |
 | `get_job_results` | Partial once paused, final once complete; **never blocks.** |
@@ -28,6 +28,19 @@ Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (
 | `get_account_balance` | Credit left, spend this period, spending cap, amount owed. |
 
 Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
+
+### Setup review before the draft
+
+Before either create tool makes a draft, it sends the setup through the SDK to Rapidata's setup review (`POST /job/task-feedback`): the task type, the question, the answer options and up to 10 datapoints (spread over the set when there are more), each with its references and context. A text-only question is reviewed with the placeholder image the annotators see.
+
+| `feedback_check` | When | Result |
+|---|---|---|
+| `passed` | The review found nothing. | The draft, as before. |
+| `flagged` | The review found problems. | **No draft:** `created: false`, `feedback` (`kind`, `message`, `datapoint_index`) and a `next_step` that says to fix the setup and call again. With `force=true` (only once the user has seen the feedback) the draft is created and `feedback` still comes back. |
+| `skipped` | The sign-in did not grant `job:task-feedback` (connections from before the scope existed). | The draft, as before; the skip is logged. |
+| `unavailable` | The review failed, refused the setup, hit the organization's hourly limit or took longer than 10 s. | The draft, as before; the reason is logged. |
+
+`created`, `feedback` and `feedback_check` are optional in the output schema, so clients that cached the earlier schema still accept the result. A finding kind this server does not know yet is passed on with its message.
 
 ### Media: upload first, then pass references
 
@@ -111,7 +124,7 @@ Fetching that metadata document returns:
 {
   "resource": "https://mcp.rapidata.ai",
   "authorization_servers": ["https://auth.rapidata.ai/"],
-  "scopes_supported": ["openid", "profile", "email", "roles", "offline_access", "mcp", "api"],
+  "scopes_supported": ["openid", "profile", "email", "roles", "offline_access", "mcp", "api", "job:task-feedback"],
   "bearer_methods_supported": ["header"]
 }
 ```
@@ -136,12 +149,14 @@ The authorization-server discovery document
 
 Run the standard authorization-code flow with PKCE:
 
-- **Scopes:** request `openid email roles offline_access mcp api`.
+- **Scopes:** request `openid email roles offline_access mcp api job:task-feedback`.
   (`offline_access` yields a refresh token so the client can stay connected without re-prompting;
   `roles` and `email` identify the customer; `mcp` carries the MCP server as an OAuth resource so
   the authorization server accepts the RFC 8707 resource indicator the client sends for this server;
   `api` carries the backend API as a resource so the forwarded token stays valid at the API once it
-  enforces audiences.)
+  enforces audiences; `job:task-feedback` lets the server run the setup review, which `api` does not
+  cover. The server exchanges for `api job:task-feedback` and falls back to `api` when the user never
+  consented to the second scope.)
 - One-time browser consent, then the client exchanges the code (with its PKCE verifier) for an
   access token and a refresh token.
 
@@ -200,7 +215,7 @@ instructions, such as Claude Code, also get it on the last line of those instruc
 |---|---|---|
 | `RAPIDATA_MCP_RESOURCE_URL` | `https://mcp.rapidata.ai` | This server's public resource identifier. |
 | `RAPIDATA_MCP_ISSUER_URL` | `https://auth.rapidata.ai` | The authorization server (issuer). |
-| `RAPIDATA_MCP_SCOPES` | `openid profile email roles offline_access` | Advertised `scopes_supported`. |
+| `RAPIDATA_MCP_SCOPES` | `openid profile email roles offline_access mcp api job:task-feedback` | Advertised `scopes_supported`. Every registered client must already hold a scope listed here, or its sign-in fails. |
 | `RAPIDATA_MCP_CLIENT_ID` | `rapidata-mcp-server` | OIDC client this server exchanges tokens as. |
 | `RAPIDATA_MCP_CLIENT_ASSERTION_FILE` | _(unset)_ | Path to a JWT (the pod's projected service-account token) the client authenticates with; re-read on every exchange. When this or the secret is set, the caller's token is exchanged (RFC 8693) at `<issuer>/connect/token` for an API token; with neither, the caller's token is forwarded. |
 | `RAPIDATA_MCP_CLIENT_SECRET` | _(unset)_ | **Local dev only.** Client secret, used when no assertion file is set. |
@@ -209,7 +224,7 @@ instructions, such as Claude Code, also get it on the last line of those instruc
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address. |
 | `LOG_LEVEL` | `INFO` | Logging level. |
 | `RAPIDATA_MCP_IMAGE_TAG` | _(unset → `dev`)_ | Set by the image build to the tag it pushes. The server reports it, with the rapidata SDK version, as its version. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset → no export)_ | OTLP/gRPC collector for the traces: one span per tool call (service `rapidata-mcp-service`), a child span per API call, continued by the backend. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset → no export)_ | OTLP/gRPC collector for the traces: one span per tool call (service `rapidata-mcp-service`), a child span per API call, continued by the backend. A create call's span carries `rapidata.task_feedback.check`, `.created`, `.kinds` and `.force`. |
 | `RAPIDATA_MCP_AUTH_DISABLED` | _(unset)_ | **Local dev only.** Serve without auth using ambient SDK credentials (`RAPIDATA_CLIENT_ID` / `RAPIDATA_CLIENT_SECRET`). |
 
 ## Endpoints

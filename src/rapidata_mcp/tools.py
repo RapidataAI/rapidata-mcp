@@ -93,9 +93,22 @@ _IMPORT_WORKERS = 8
 _PRICE_TIMEOUT_S = 10.0
 _pricing = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pricing")
 
+TASK_FEEDBACK_SCOPE = "job:task-feedback"
+# The review takes at most 10 datapoints. Waiting on it blocks the event loop, and
+# with it the 1 s /health probes, so it gets less than the backend's own 15 s.
+_FEEDBACK_DATAPOINTS = 10
+_FEEDBACK_TIMEOUT_S = 10.0
+_reviews = ThreadPoolExecutor(max_workers=16, thread_name_prefix="task-feedback")
+
 _OUTDATED_TOOLS = (
     "Your client is showing an outdated list of Rapidata tools. Ask the user to start "
     "a new chat or refresh the Rapidata connector, then use the tools it lists."
+)
+
+_FORCE_DESCRIPTION = (
+    "Create the draft even though Rapidata's setup review flags the setup. Only "
+    "after the user has seen the feedback and wants this exact setup anyway; the "
+    "feedback still comes back."
 )
 
 _USE_REFERENCES = (
@@ -138,7 +151,16 @@ class UploadList(TypedDict):
     next_step: str
 
 
-class DraftResult(TypedDict):
+class TaskFeedback(TypedDict):
+    kind: str
+    message: str
+    datapoint_index: int | None
+
+
+FeedbackCheck = Literal["passed", "flagged", "skipped", "unavailable"]
+
+
+class _DraftResultBase(TypedDict):
     job_definition_id: str
     name: str
     status: str
@@ -149,6 +171,13 @@ class DraftResult(TypedDict):
     budget_left_usd: float | None
     confirmation_required: bool
     next_step: str
+
+
+# Optional, so the required fields stay those clients cached before these existed.
+class DraftResult(_DraftResultBase, total=False):
+    created: bool | None
+    feedback: list[TaskFeedback] | None
+    feedback_check: FeedbackCheck | None
 
 
 class AccountBalance(TypedDict):
@@ -264,6 +293,8 @@ def register_tools(
         client: RapidataClient,
         definition: RapidataJobDefinition,
         total_responses: int,
+        check: FeedbackCheck,
+        feedback: list[TaskFeedback],
     ) -> DraftResult:
         price = _pricing.submit(
             contextvars.copy_context().run, _estimated_cost, definition
@@ -282,6 +313,12 @@ def register_tools(
         credit_text = ""
         if budget_left is not None:
             credit_text = f" The account has ${budget_left:.2f} left to spend."
+        flagged_text = ""
+        if feedback:
+            flagged_text = (
+                " Rapidata's setup review flagged the problems listed in feedback; "
+                "tell the user, as they make the answers less reliable."
+            )
         return {
             "job_definition_id": definition.id,
             "name": definition.name,
@@ -296,10 +333,13 @@ def register_tools(
             "next_step": (
                 "This job definition is a DRAFT and is NOT collecting responses "
                 f"yet. Starting it will collect {cost_text} and spend money."
-                f"{credit_text} Present this cost to the user and ask whether to "
-                "start collecting. Only after the user confirms, call start_job "
-                "with this job_definition_id."
+                f"{credit_text}{flagged_text} Present this cost to the user and ask "
+                "whether to start collecting. Only after the user confirms, call "
+                "start_job with this job_definition_id."
             ),
+            "created": True,
+            "feedback": feedback,
+            "feedback_check": check,
         }
 
     def _open_upload_session() -> MediaUpload:
@@ -566,6 +606,7 @@ def register_tools(
                 )
             ),
         ] = False,
+        force: Annotated[bool, Field(description=_FORCE_DESCRIPTION)] = False,
     ) -> DraftResult:
         """Create a classification task where humans pick one answer option per item.
 
@@ -573,9 +614,12 @@ def register_tools(
         paths. Leave ``datapoint_references`` out only for a text-only question:
         never as a fallback for media you could not upload.
 
-        Creates a DRAFT job definition and does NOT start collecting responses (or
-        spend): it returns ``confirmation_required`` and expects you to confirm the
-        cost with the user, then call ``start_job``, which picks who answers.
+        Rapidata first reviews the setup against its task design rules. When the
+        review flags it, nothing is created: ``created`` is false and ``feedback``
+        says what to fix. Otherwise it creates a DRAFT job definition and does NOT
+        start collecting responses (or spend): it returns ``confirmation_required``
+        and expects you to confirm the cost with the user, then call ``start_job``,
+        which picks who answers.
         """
         datapoints: list[str | UploadedAsset] = (
             [
@@ -593,7 +637,21 @@ def register_tools(
 
         from rapidata import NoShuffleSetting
 
-        client = _client()
+        provider = provider_factory()
+        client = provider.get_client()
+        total_responses = len(datapoints) * responses_per_datapoint
+        check, feedback = _check_setup(
+            provider,
+            client,
+            task_type="classify",
+            instruction=instruction,
+            answer_options=answer_options,
+            assets=[[d if isinstance(d, str) else d.name] for d in datapoints],
+            contexts=contexts,
+        )
+        if check == "flagged" and not force:
+            return _not_created(name, total_responses, feedback)
+
         definition = client.job.create_classification_job_definition(
             name=name,
             instruction=instruction,
@@ -604,9 +662,7 @@ def register_tools(
             confidence_threshold=confidence_threshold,
             settings=[NoShuffleSetting()] if keep_option_order else None,
         )
-        return _draft_result(
-            client, definition, len(datapoints) * responses_per_datapoint
-        )
+        return _draft_result(client, definition, total_responses, check, feedback)
 
     @mcp.tool(
         title="Create comparison task",
@@ -662,15 +718,18 @@ def register_tools(
                 )
             ),
         ] = None,
+        force: Annotated[bool, Field(description=_FORCE_DESCRIPTION)] = False,
     ) -> DraftResult:
         """Create a pairwise comparison task: humans choose between two items each.
 
         Useful for evaluating or ranking outputs (e.g. which of two images better
-        matches a prompt). Like classification, it creates a DRAFT job definition
-        and only spends once you confirm the cost with the user and call
-        ``start_job``. Each pair must hold exactly two asset references from
-        ``upload_media`` (never URLs or paths), so (unlike classification) the
-        media is required. ``start_job`` picks who answers.
+        matches a prompt). Like classification, Rapidata first reviews the setup
+        and creates nothing when the review flags it (``created`` false, see
+        ``feedback``); otherwise it creates a DRAFT job definition and only spends
+        once you confirm the cost with the user and call ``start_job``. Each pair
+        must hold exactly two asset references from ``upload_media`` (never URLs or
+        paths), so (unlike classification) the media is required. ``start_job``
+        picks who answers.
         """
         if not comparison_pairs:
             raise ValueError("comparison_pairs must not be empty")
@@ -687,7 +746,21 @@ def register_tools(
             for i, pair in enumerate(comparison_pairs)
         ]
 
-        client = _client()
+        provider = provider_factory()
+        client = provider.get_client()
+        total_responses = len(pairs) * responses_per_datapoint
+        check, feedback = _check_setup(
+            provider,
+            client,
+            task_type="compare",
+            instruction=instruction,
+            answer_options=None,
+            assets=[[asset.name for asset in pair] for pair in pairs],
+            contexts=contexts,
+        )
+        if check == "flagged" and not force:
+            return _not_created(name, total_responses, feedback)
+
         definition = client.job.create_compare_job_definition(
             name=name,
             instruction=instruction,
@@ -696,9 +769,7 @@ def register_tools(
             contexts=contexts,
             confidence_threshold=confidence_threshold,
         )
-        return _draft_result(
-            client, definition, len(comparison_pairs) * responses_per_datapoint
-        )
+        return _draft_result(client, definition, total_responses, check, feedback)
 
     @mcp.tool(
         title="Start job",
@@ -1030,6 +1101,102 @@ def _reject_outdated_calls(mcp: FastMCP) -> None:
         return await call_tool(name, arguments, *args, **kwargs)
 
     manager.call_tool = checked_call
+
+
+def _check_setup(
+    provider: ClientProvider,
+    client: RapidataClient,
+    *,
+    task_type: Literal["classify", "compare"],
+    instruction: str,
+    answer_options: list[str] | None,
+    assets: list[list[str]],
+    contexts: list[str] | None,
+) -> tuple[FeedbackCheck, list[TaskFeedback]]:
+    if not provider.grants(TASK_FEEDBACK_SCOPE):
+        logger.info(
+            "Task feedback check skipped: the sign-in did not grant %s",
+            TASK_FEEDBACK_SCOPE,
+        )
+        return "skipped", []
+
+    picked = _spread(len(assets), _FEEDBACK_DATAPOINTS)
+    setup = {
+        "taskType": task_type,
+        "instruction": instruction,
+        "answerOptions": answer_options,
+        "datapoints": [
+            {"assets": assets[i], "context": contexts[i] if contexts else None}
+            for i in picked
+        ],
+    }
+    pending = _reviews.submit(contextvars.copy_context().run, _review, client, setup)
+    try:
+        findings = pending.result(timeout=_FEEDBACK_TIMEOUT_S).findings
+    except Exception as e:
+        logger.warning("Task feedback check unavailable, creating without it: %r", e)
+        return "unavailable", []
+
+    feedback: list[TaskFeedback] = []
+    for finding in findings:
+        index = finding.datapoint_index
+        feedback.append(
+            {
+                "kind": str(getattr(finding.kind, "value", finding.kind)),
+                "message": finding.message,
+                "datapoint_index": picked[index]
+                if index is not None and 0 <= index < len(picked)
+                else None,
+            }
+        )
+    return ("flagged" if feedback else "passed"), feedback
+
+
+def _review(client: RapidataClient, setup: dict[str, Any]) -> Any:
+    from rapidata.api_client.models.review_task_setup_endpoint_input import (
+        ReviewTaskSetupEndpointInput,
+    )
+    from rapidata.api_client.rest import without_unsafe_retries
+
+    request = ReviewTaskSetupEndpointInput.model_validate(setup)
+    # A 503 means the review is off or gave up; retrying it only adds load.
+    with without_unsafe_retries():
+        return client._openapi_service.order.job_api.job_task_feedback_post(
+            review_task_setup_endpoint_input=request,
+            _request_timeout=_FEEDBACK_TIMEOUT_S,
+        )
+
+
+def _spread(count: int, size: int) -> list[int]:
+    if count <= size:
+        return list(range(count))
+    return [round(i * (count - 1) / (size - 1)) for i in range(size)]
+
+
+def _not_created(
+    name: str, total_responses: int, feedback: list[TaskFeedback]
+) -> DraftResult:
+    return {
+        "job_definition_id": "",
+        "name": name,
+        "status": "not_created",
+        "details_url": "",
+        "runs_on": "",
+        "total_responses": total_responses,
+        "estimated_cost_usd": None,
+        "budget_left_usd": None,
+        "confirmation_required": False,
+        "next_step": (
+            "Nothing was created: Rapidata's setup review found problems that make "
+            "the human answers unreliable (see feedback). Fix the setup as each "
+            "message says and call this tool again. If it cannot be fixed, show the "
+            "feedback to the user; only if they want this exact setup anyway, call "
+            "again with force=true."
+        ),
+        "created": False,
+        "feedback": feedback,
+        "feedback_check": "flagged",
+    }
 
 
 def _within(future: Future[Any], deadline: float) -> Any:

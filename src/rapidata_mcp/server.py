@@ -61,7 +61,7 @@ from rapidata_mcp.telemetry import (
     trace_tool_calls,
 )
 from rapidata_mcp.token_verifier import JWTVerifier
-from rapidata_mcp.tools import register_tools
+from rapidata_mcp.tools import TASK_FEEDBACK_SCOPE, register_tools
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,8 @@ _MCP_PATH = "/mcp"
 # resource indicator they send for this server (otherwise: invalid_target).
 # "api" must stay: the auth server only exchanges the mcp token for api scopes the
 # user consented to in the same authorization.
+# A scope added here must first be granted to every registered client, or their
+# sign-in fails (ID2051).
 _DEFAULT_SCOPES = [
     "openid",
     "profile",
@@ -80,6 +82,7 @@ _DEFAULT_SCOPES = [
     "offline_access",
     "mcp",
     "api",
+    TASK_FEEDBACK_SCOPE,
 ]
 
 # Surfaced to the connecting agent via the MCP initialize response so it knows,
@@ -385,6 +388,8 @@ def _token_provider_factory(settings: Settings):
             settings.api_resource,
             client_assertion_file=settings.client_assertion_file,
             client_secret=settings.client_secret,
+            scope=f"api {TASK_FEEDBACK_SCOPE}",
+            fallback_scope="api",
         )
     else:
         logger.warning(
