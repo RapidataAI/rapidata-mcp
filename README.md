@@ -29,6 +29,13 @@ Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (
 
 Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
 
+How many responses a task collects follows the SDK's stopping rules:
+
+| Tool | Default | Options |
+|---|---|---|
+| `create_comparison_task` | Adaptive stopping (`AdaptiveStopping()`): each pair collects until its result is clear, about 21 responses on average (7 for a clear pair, around 31 for a close one), capped at 100. | `responses_per_datapoint` for exactly that many per pair. |
+| `create_classification_task` | 10 responses per item. | `responses_per_datapoint` for another fixed count, at least 10. |
+
 ### Setup review before the draft
 
 Before either create tool makes a draft, it sends the setup through the SDK to Rapidata's setup review (`POST /job/task-feedback`): the task type, the question, the answer options and up to 10 datapoints (spread over the set when there are more), each with its references and context. A text-only question is reviewed with the placeholder image the annotators see.
@@ -68,8 +75,9 @@ flowchart LR
 Two invariants hold across the tool layer:
 
 - **Spending is explicit.** Creating a task never spends. `create_*` returns a draft with
-  `confirmation_required` and `total_responses` (datapoints × responses_per_datapoint) as the honest
-  cost driver; `start_job` is the only step that spends. The create response instructs the agent to
+  `confirmation_required` and `total_responses` (the most responses the draft can collect, which is
+  what Rapidata's estimate counts; under adaptive stopping that is 100 per pair, while a pair
+  usually needs about 21) as the honest cost driver; `start_job` is the only step that spends. The create response instructs the agent to
   confirm the cost with the user and review the `details_url` before starting. Billing is pre-paid,
   pay-as-you-go for individual (non-organization) accounts, and new sign-ups get **$20 in free
   credit** — so trying these tools out is free.
@@ -88,7 +96,8 @@ powerful and is the right tool once you outgrow the two task types here:
   classify/compare).
 - **Building custom audiences** — train annotators on qualification examples, and target by
   age, gender, device, and more.
-- **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **confidence stopping**.
+- **Benchmarks / leaderboards (MRI)**, **flows** (continuous ranking), and **tuned stopping rules**
+  (`AdaptiveStopping` parameters, `QuorumStopping`).
 - **Richer results** — per-annotator reliability (`userScore`), demographics, and
   `to_pandas()` / `to_json()` helpers.
 

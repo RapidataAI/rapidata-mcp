@@ -747,6 +747,36 @@ def test_a_draft_comes_back_without_a_price_after_the_limit(monkeypatch):
     assert "about $" not in result["next_step"]
 
 
+def test_a_comparison_collects_until_each_pair_is_clear_by_default():
+    from rapidata import AdaptiveStopping
+
+    mcp, provider = _server()
+
+    result = _call(
+        mcp,
+        "create_comparison_task",
+        name="n",
+        instruction="Which image looks more realistic?",
+        comparison_pairs=[[REF_A, REF_B], [REF_B, REF_A]],
+    )
+
+    assert provider.client.job.created[0]["responses_per_datapoint"] == (
+        AdaptiveStopping()
+    )
+    assert result["total_responses"] == 200
+    assert "until each pair's result is clear" in result["next_step"]
+    assert "never more than 100" in result["next_step"]
+    assert "a fifth to a third of it" in result["next_step"]
+
+
+def test_a_fixed_count_collects_exactly_that_many():
+    mcp, provider = _server()
+
+    _create_comparison(mcp)
+
+    assert provider.client.job.created[0]["responses_per_datapoint"] == 20
+
+
 def test_account_balance_for_a_new_prepaid_account():
     mcp, _ = _server()
 

@@ -41,7 +41,7 @@ from rapidata_mcp.uploads import UploadSessions, check_reference, is_http_url
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
-    from rapidata import RapidataClient, UploadedAsset
+    from rapidata import AdaptiveStopping, RapidataClient, UploadedAsset
     from rapidata.rapidata_client.job.rapidata_job import RapidataJob
     from rapidata.rapidata_client.job.rapidata_job_definition import (
         RapidataJobDefinition,
@@ -92,6 +92,12 @@ _IMPORT_WORKERS = 8
 # waits at most this long and comes back without a price after it.
 _PRICE_TIMEOUT_S = 10.0
 _pricing = ThreadPoolExecutor(max_workers=32, thread_name_prefix="pricing")
+
+# The server's default adaptive-stopping cap; cost estimates count it in full.
+_ADAPTIVE_MAX_RESPONSES = 100
+_ADAPTIVE_TYPICAL = (
+    "about 21 per pair on average: 7 for a clear pair, around 31 for a close one"
+)
 
 TASK_FEEDBACK_SCOPE = "job:task-feedback"
 # The review takes at most 10 datapoints. Waiting on it blocks the event loop, and
@@ -293,6 +299,7 @@ def register_tools(
         client: RapidataClient,
         definition: RapidataJobDefinition,
         total_responses: int,
+        stopping: int | AdaptiveStopping,
         check: FeedbackCheck,
         feedback: list[TaskFeedback],
     ) -> DraftResult:
@@ -307,9 +314,6 @@ def register_tools(
         account = _within(balance, deadline)
         budget_left = account["budget_left_usd"] if account else None
 
-        cost_text = f"{total_responses} human responses"
-        if cost is not None:
-            cost_text += f" for about ${cost:.2f} (Rapidata's estimate)"
         credit_text = ""
         if budget_left is not None:
             credit_text = f" The account has ${budget_left:.2f} left to spend."
@@ -332,7 +336,7 @@ def register_tools(
             "confirmation_required": True,
             "next_step": (
                 "This job definition is a DRAFT and is NOT collecting responses "
-                f"yet. Starting it will collect {cost_text} and spend money."
+                f"yet. {_collection_text(stopping, total_responses, cost)}"
                 f"{credit_text}{flagged_text} Present this cost to the user and ask "
                 "whether to start collecting. Only after the user confirms, call "
                 "start_job with this job_definition_id."
@@ -573,7 +577,13 @@ def register_tools(
             ),
         ] = None,
         responses_per_datapoint: Annotated[
-            int, Field(description="Number of human responses to collect per item.")
+            int,
+            Field(
+                description=(
+                    "Human responses to collect per item, at least 10: with fewer, "
+                    "one misread answer can flip a result."
+                )
+            ),
         ] = 10,
         contexts: Annotated[
             list[str] | None,
@@ -581,19 +591,6 @@ def register_tools(
                 description=(
                     "Optional per-datapoint text shown alongside the instruction. "
                     "If given, must have one entry per datapoint."
-                )
-            ),
-        ] = None,
-        confidence_threshold: Annotated[
-            float | None,
-            Field(
-                description=(
-                    "Optional early stop, as a probability strictly between 0 and 1: "
-                    "stop collecting for a datapoint once the leading answer is this "
-                    "likely to be the crowd's true choice, or when "
-                    "responses_per_datapoint is reached. Scales logarithmically "
-                    "(0.99 to 0.999 is a big step). Omit to always collect "
-                    "responses_per_datapoint."
                 )
             ),
         ] = None,
@@ -659,10 +656,16 @@ def register_tools(
             datapoints=datapoints,
             responses_per_datapoint=responses_per_datapoint,
             contexts=contexts,
-            confidence_threshold=confidence_threshold,
             settings=[NoShuffleSetting()] if keep_option_order else None,
         )
-        return _draft_result(client, definition, total_responses, check, feedback)
+        return _draft_result(
+            client,
+            definition,
+            total_responses,
+            responses_per_datapoint,
+            check,
+            feedback,
+        )
 
     @mcp.tool(
         title="Create comparison task",
@@ -694,27 +697,21 @@ def register_tools(
             ),
         ],
         responses_per_datapoint: Annotated[
-            int, Field(description="Number of human responses to collect per pair.")
-        ] = 10,
+            int | None,
+            Field(
+                description=(
+                    "Leave it out: each pair then collects responses until its "
+                    f"result is clear ({_ADAPTIVE_TYPICAL}). Set a number, at least "
+                    "10, only when the user wants exactly that many per pair."
+                )
+            ),
+        ] = None,
         contexts: Annotated[
             list[str] | None,
             Field(
                 description=(
                     "Optional per-pair text shown alongside the instruction. If "
                     "given, must have one entry per pair."
-                )
-            ),
-        ] = None,
-        confidence_threshold: Annotated[
-            float | None,
-            Field(
-                description=(
-                    "Optional early stop, as a probability strictly between 0 and "
-                    "1: stop collecting for a pair once the leading item is this "
-                    "likely to be the crowd's true preference, or when "
-                    "responses_per_datapoint is reached. Scales logarithmically "
-                    "(0.99 to 0.999 is a big step). Omit to always collect "
-                    "responses_per_datapoint."
                 )
             ),
         ] = None,
@@ -746,9 +743,16 @@ def register_tools(
             for i, pair in enumerate(comparison_pairs)
         ]
 
+        from rapidata import AdaptiveStopping
+
+        stopping: int | AdaptiveStopping = (
+            AdaptiveStopping()
+            if responses_per_datapoint is None
+            else responses_per_datapoint
+        )
         provider = provider_factory()
         client = provider.get_client()
-        total_responses = len(pairs) * responses_per_datapoint
+        total_responses = len(pairs) * _max_responses(stopping)
         check, feedback = _check_setup(
             provider,
             client,
@@ -765,11 +769,12 @@ def register_tools(
             name=name,
             instruction=instruction,
             datapoints=pairs,
-            responses_per_datapoint=responses_per_datapoint,
+            responses_per_datapoint=stopping,
             contexts=contexts,
-            confidence_threshold=confidence_threshold,
         )
-        return _draft_result(client, definition, total_responses, check, feedback)
+        return _draft_result(
+            client, definition, total_responses, stopping, check, feedback
+        )
 
     @mcp.tool(
         title="Start job",
@@ -922,6 +927,10 @@ def register_tools(
         "complete"``; if it was paused, returns the partial snapshot collected so
         far. If it is still processing, returns a ``result_status`` to poll on
         (e.g. ``not_started``, ``collecting``, ``manual_review``) and no results.
+
+        For a comparison, read each pair's ``adaptiveStoppingState.verdict``, not
+        ``winner``: ``Ambiguous`` means the two are genuinely close, not that too
+        few responses came in.
         """
         job = _job(job_id)
         status = job.get_status()
@@ -1165,6 +1174,37 @@ def _review(client: RapidataClient, setup: dict[str, Any]) -> Any:
             review_task_setup_endpoint_input=request,
             _request_timeout=_FEEDBACK_TIMEOUT_S,
         )
+
+
+def _max_responses(stopping: int | AdaptiveStopping) -> int:
+    if isinstance(stopping, int):
+        return stopping
+    return stopping.max_responses or _ADAPTIVE_MAX_RESPONSES
+
+
+def _collection_text(
+    stopping: int | AdaptiveStopping,
+    total_responses: int,
+    cost: float | None,
+) -> str:
+    estimate = None if cost is None else f"about ${cost:.2f}"
+    if isinstance(stopping, int):
+        price = f" for {estimate} (Rapidata's estimate)" if estimate else ""
+        return (
+            f"Starting it will collect {total_responses} human responses{price} "
+            "and spend money."
+        )
+    cap = _max_responses(stopping)
+    text = (
+        "Starting it will collect responses until each pair's result is clear "
+        f"({_ADAPTIVE_TYPICAL}, never more than {cap}) and spend money."
+    )
+    if estimate:
+        text += (
+            f" Rapidata's estimate of {estimate} counts all {cap} per pair, so the "
+            "real cost is usually a fifth to a third of it."
+        )
+    return text
 
 
 def _spread(count: int, size: int) -> list[int]:
