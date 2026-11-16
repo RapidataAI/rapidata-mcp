@@ -27,7 +27,7 @@ Tasks run as **jobs** on Rapidata: a create tool produces a **job definition** (
 | `pause_job` / `resume_job` | Stop collecting (and spending), and continue. |
 | `get_account_balance` | Credit left, spend this period, spending cap, amount owed. |
 
-Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**.
+Both create tools take the same core parameters: the **question** (`instruction`), optional per-datapoint **`contexts`** (text shown alongside the question), **`responses_per_datapoint`**, and — classification only — the **`answer_options`**. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
 
 How many responses a task collects follows the SDK's stopping rules:
 
@@ -35,8 +35,6 @@ How many responses a task collects follows the SDK's stopping rules:
 |---|---|---|
 | `create_comparison_task` | Adaptive stopping (`AdaptiveStopping()`): each pair collects until its result is clear, about 21 responses on average (7 for a clear pair, around 31 for a close one), capped at 100. | `responses_per_datapoint` for exactly that many per pair. |
 | `create_classification_task` | 10 responses per item. | `quorum` (a question with one correct answer): an item stops once that many agree, with `responses_per_datapoint` as the cap (`QuorumStopping`). |
-
-`confidence_threshold`, which the SDK deprecated, is gone from both tools; a client that still sends it is told to refresh its tool list. Media is given as asset references: `comparison_pairs` (two per pair, required) for comparison, and `datapoint_references` for classification — where it is **optional**, for a genuinely text-only question: omit it and the crowd answers the instruction on its own against a generic placeholder image.
 
 ### Setup review before the draft
 
