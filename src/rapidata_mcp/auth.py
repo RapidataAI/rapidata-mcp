@@ -41,6 +41,10 @@ class ClientProvider(Protocol):
         """The bearer token that :meth:`get_client`'s client sends to the API."""
         ...
 
+    def grants(self, scope: str) -> bool:
+        """Whether that token carries ``scope``."""
+        ...
+
 
 class EnvClientProvider:
     """Builds one :class:`RapidataClient` from ambient credentials and reuses it."""
@@ -62,6 +66,10 @@ class EnvClientProvider:
     def get_api_token(self) -> str:
         return self.get_client().get_token()["access_token"]
 
+    def grants(self, scope: str) -> bool:
+        token = self.get_client().get_token()
+        return scope in str(token.get("scope", "")).split()
+
 
 class TokenClientProvider:
     """Builds a :class:`RapidataClient` from a caller-supplied OAuth token.
@@ -81,6 +89,9 @@ class TokenClientProvider:
 
     def get_api_token(self) -> str:
         return self._token["access_token"]
+
+    def grants(self, scope: str) -> bool:
+        return scope in str(self._token.get("scope", "")).split()
 
 
 _TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -110,6 +121,7 @@ class TokenExchanger:
         client_assertion_file: str | None = None,
         client_secret: str | None = None,
         scope: str = "api",
+        fallback_scope: str | None = None,
         skew: int = 60,
         http: httpx.Client | None = None,
     ) -> None:
@@ -121,6 +133,7 @@ class TokenExchanger:
         self._client_secret = client_secret
         self._api_resource = api_resource
         self._scope = scope
+        self._fallback_scope = fallback_scope
         self._skew = skew
         self._http = http or traced_http_client(timeout=10.0)
         self._cache: dict[str, dict] = {}
@@ -144,38 +157,17 @@ class TokenExchanger:
         return token
 
     def _request(self, subject_token: str, now: float) -> dict:
-        data = {
-            "grant_type": _TOKEN_EXCHANGE_GRANT,
-            "subject_token": subject_token,
-            "subject_token_type": _ACCESS_TOKEN_TYPE,
-            "resource": self._api_resource,
-            "scope": self._scope,
-        }
-        auth: httpx.BasicAuth | None = None
-        if self._client_assertion_file:
-            try:
-                with open(self._client_assertion_file) as f:
-                    assertion = f.read().strip()
-            except OSError as e:
-                raise TokenExchangeError(
-                    f"Token exchange failed: cannot read client assertion: {e}"
-                ) from e
-            data |= {
-                "client_id": self._client_id,
-                "client_assertion_type": _JWT_BEARER_ASSERTION,
-                "client_assertion": assertion,
-            }
-        else:
-            assert self._client_secret is not None
-            auth = httpx.BasicAuth(self._client_id, self._client_secret)
-
-        try:
-            if auth is None:
-                resp = self._http.post(self._token_endpoint, data=data)
-            else:
-                resp = self._http.post(self._token_endpoint, data=data, auth=auth)
-        except httpx.HTTPError as e:
-            raise TokenExchangeError(f"Token exchange failed: {e}") from e
+        scope = self._scope
+        resp = self._post(subject_token, scope)
+        if (
+            self._fallback_scope
+            and resp.status_code == 400
+            and _error_code(resp) == "invalid_scope"
+        ):
+            # The user never consented to the extra scopes (signed in before they
+            # existed): fall back to the base scope instead of failing every call.
+            scope = self._fallback_scope
+            resp = self._post(subject_token, scope)
 
         if resp.status_code in (400, 401):
             if _error_code(resp) == "invalid_grant":
@@ -197,7 +189,41 @@ class TokenExchanger:
             "access_token": body["access_token"],
             "token_type": body.get("token_type", "Bearer"),
             "expires_at": int(now + int(body.get("expires_in", 3600))),
+            "scope": body.get("scope") or scope,
         }
+
+    def _post(self, subject_token: str, scope: str) -> httpx.Response:
+        data = {
+            "grant_type": _TOKEN_EXCHANGE_GRANT,
+            "subject_token": subject_token,
+            "subject_token_type": _ACCESS_TOKEN_TYPE,
+            "resource": self._api_resource,
+            "scope": scope,
+        }
+        auth: httpx.BasicAuth | None = None
+        if self._client_assertion_file:
+            try:
+                with open(self._client_assertion_file) as f:
+                    assertion = f.read().strip()
+            except OSError as e:
+                raise TokenExchangeError(
+                    f"Token exchange failed: cannot read client assertion: {e}"
+                ) from e
+            data |= {
+                "client_id": self._client_id,
+                "client_assertion_type": _JWT_BEARER_ASSERTION,
+                "client_assertion": assertion,
+            }
+        else:
+            assert self._client_secret is not None
+            auth = httpx.BasicAuth(self._client_id, self._client_secret)
+
+        try:
+            if auth is None:
+                return self._http.post(self._token_endpoint, data=data)
+            return self._http.post(self._token_endpoint, data=data, auth=auth)
+        except httpx.HTTPError as e:
+            raise TokenExchangeError(f"Token exchange failed: {e}") from e
 
 
 def _error_body(resp: httpx.Response) -> dict:
@@ -237,7 +263,12 @@ class ExchangedTokenProvider:
         from rapidata import RapidataClient
 
         token = self._exchanger.exchange(self._subject_token)
-        return RapidataClient(token=dict(token), environment=self._environment)
+        sdk_token = {k: token[k] for k in ("access_token", "token_type", "expires_at")}
+        return RapidataClient(token=sdk_token, environment=self._environment)
 
     def get_api_token(self) -> str:
         return self._exchanger.exchange(self._subject_token)["access_token"]
+
+    def grants(self, scope: str) -> bool:
+        token = self._exchanger.exchange(self._subject_token)
+        return scope in str(token.get("scope", "")).split()

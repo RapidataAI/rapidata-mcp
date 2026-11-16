@@ -147,6 +147,8 @@ def trace_tool_calls(mcp: FastMCP) -> None:
         ) as span:
             _set_caller(span, mcp)
             _set_job_ids(span, arguments)
+            if isinstance(arguments.get("force"), bool):
+                span.set_attribute("rapidata.task_feedback.force", arguments["force"])
             try:
                 result = await call_tool(name, arguments, *args, **kwargs)
             except Exception as e:
@@ -156,6 +158,7 @@ def trace_tool_calls(mcp: FastMCP) -> None:
             span.set_attribute("rapidata.mcp.outcome", "ok")
             if isinstance(result, tuple) and isinstance(result[-1], Mapping):
                 _set_job_ids(span, result[-1])
+                _set_task_feedback(span, result[-1])
             return result
 
     manager.call_tool = traced_call
@@ -185,3 +188,15 @@ def _set_job_ids(span: Span, values: Mapping[str, Any]) -> None:
         value = values.get(key)
         if isinstance(value, str) and value:
             span.set_attribute(f"rapidata.{key}", value)
+
+
+def _set_task_feedback(span: Span, values: Mapping[str, Any]) -> None:
+    check = values.get("feedback_check")
+    if isinstance(check, str):
+        span.set_attribute("rapidata.task_feedback.check", check)
+    if isinstance(values.get("created"), bool):
+        span.set_attribute("rapidata.task_feedback.created", values["created"])
+    feedback = values.get("feedback")
+    if isinstance(feedback, list) and feedback:
+        kinds = [str(f.get("kind")) for f in feedback if isinstance(f, Mapping)]
+        span.set_attribute("rapidata.task_feedback.kinds", kinds)

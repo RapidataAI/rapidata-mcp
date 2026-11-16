@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -147,10 +148,37 @@ class FakeBilling:
         return self.owed
 
 
+class FakeTaskFeedback:
+    """The backend's setup review: records each request, answers with ``findings``."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.findings: list[dict[str, Any]] = []
+        self.error: Exception | None = None
+        self.delay = 0.0
+
+    def job_task_feedback_post(
+        self, review_task_setup_endpoint_input: Any, _request_timeout: float
+    ) -> Any:
+        from rapidata.api_client.models.review_task_setup_endpoint_output import (
+            ReviewTaskSetupEndpointOutput,
+        )
+
+        self.requests.append(review_task_setup_endpoint_input.to_dict())
+        time.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        return ReviewTaskSetupEndpointOutput.from_dict(
+            {"passes": not self.findings, "findings": self.findings}
+        )
+
+
 class FakeProvider:
     def __init__(self) -> None:
         billing = FakeBilling()
         audiences = FakeAudiences()
+        self.feedback = FakeTaskFeedback()
+        self.granted = {tools.TASK_FEEDBACK_SCOPE}
         self.client = SimpleNamespace(
             asset=FakeAssets(),
             job=FakeJobs(),
@@ -159,6 +187,7 @@ class FakeProvider:
             _openapi_service=SimpleNamespace(
                 payment=SimpleNamespace(billing_api=billing),
                 audience=SimpleNamespace(audience_api=audiences),
+                order=SimpleNamespace(job_api=self.feedback),
             ),
         )
 
@@ -167,6 +196,9 @@ class FakeProvider:
 
     def get_api_token(self) -> str:
         return "api-token"
+
+    def grants(self, scope: str) -> bool:
+        return scope in self.granted
 
 
 class Api:
@@ -381,6 +413,17 @@ def test_create_classification_task_passes_uploaded_assets():
     assert all(isinstance(d, rapidata.UploadedAsset) for d in datapoints)
     assert [d.name for d in datapoints] == [REF_A, REF_B]
     assert result["total_responses"] == 6
+    assert result["created"] is True
+    assert result["feedback_check"] == "passed"
+    assert result["feedback"] == []
+    [review] = provider.feedback.requests
+    assert review["taskType"] == "classify"
+    assert review["instruction"] == "i"
+    assert review["answerOptions"] == ["yes", "no"]
+    assert [(d["assets"], d.get("context")) for d in review["datapoints"]] == [
+        ([REF_A], None),
+        ([REF_B], None),
+    ]
 
 
 def test_create_classification_task_without_references_is_text_only():
@@ -398,6 +441,8 @@ def test_create_classification_task_without_references_is_text_only():
 
     created = provider.client.job.created[0]
     assert created["datapoints"] == [tools._PLACEHOLDER_IMAGE_URL]
+    [review] = provider.feedback.requests
+    assert review["datapoints"][0]["assets"] == [tools._PLACEHOLDER_IMAGE_URL]
 
 
 def test_create_comparison_task_passes_uploaded_assets():
@@ -489,6 +534,191 @@ def _create_comparison(mcp: FastMCP) -> dict[str, Any]:
         comparison_pairs=[[REF_A, REF_B]],
         responses_per_datapoint=20,
     )
+
+
+UNCLEAR = {
+    "kind": "unclear",
+    "probability": 0.93,
+    "message": "It is unclear what to judge. Say exactly what to look for.",
+    "datapointIndex": None,
+}
+
+
+def _create_classification(mcp: FastMCP, **arguments: Any) -> dict[str, Any]:
+    return _call(
+        mcp,
+        "create_classification_task",
+        **{
+            "name": "n",
+            "instruction": "Is it good?",
+            "answer_options": ["yes", "no"],
+            "datapoint_references": [REF_A],
+            **arguments,
+        },
+    )
+
+
+def test_a_flagged_setup_creates_nothing_and_says_what_to_fix():
+    mcp, provider = _server()
+    provider.feedback.findings = [UNCLEAR]
+
+    result = _create_classification(mcp)
+
+    assert provider.client.job.created == []
+    assert result["created"] is False
+    assert result["status"] == "not_created"
+    assert result["confirmation_required"] is False
+    assert result["feedback_check"] == "flagged"
+    assert result["feedback"] == [
+        {"kind": "unclear", "message": UNCLEAR["message"], "datapoint_index": None}
+    ]
+    assert "call this tool again" in result["next_step"]
+
+
+def test_force_creates_a_flagged_setup_and_keeps_the_feedback():
+    mcp, provider = _server()
+    provider.feedback.findings = [UNCLEAR]
+
+    result = _call(
+        mcp,
+        "create_comparison_task",
+        name="n",
+        instruction="Which one is right?",
+        comparison_pairs=[[REF_A, REF_B]],
+        force=True,
+    )
+
+    assert len(provider.client.job.created) == 1
+    assert result["created"] is True
+    assert result["status"] == "draft"
+    assert result["feedback_check"] == "flagged"
+    assert [f["kind"] for f in result["feedback"]] == ["unclear"]
+    assert "setup review flagged" in result["next_step"]
+
+
+def test_a_finding_of_a_kind_this_server_does_not_know_is_still_quoted():
+    mcp, provider = _server()
+    provider.feedback.findings = [
+        {**UNCLEAR, "kind": "somethingNew", "message": "Fix the new thing."}
+    ]
+
+    result = _create_classification(mcp)
+
+    assert result["created"] is False
+    assert result["feedback"] == [
+        {
+            "kind": "somethingNew",
+            "message": "Fix the new thing.",
+            "datapoint_index": None,
+        }
+    ]
+
+
+def test_the_review_sees_each_pair_with_its_context():
+    mcp, provider = _server()
+
+    _call(
+        mcp,
+        "create_comparison_task",
+        name="n",
+        instruction="Which image matches the prompt better?",
+        comparison_pairs=[[REF_A, REF_B], [REF_B, REF_A]],
+        contexts=["a cat", "a dog"],
+    )
+
+    [review] = provider.feedback.requests
+    assert review["taskType"] == "compare"
+    assert review.get("answerOptions") is None
+    assert [(d["assets"], d["context"]) for d in review["datapoints"]] == [
+        ([REF_A, REF_B], "a cat"),
+        ([REF_B, REF_A], "a dog"),
+    ]
+
+
+def test_a_large_set_is_reviewed_on_ten_spread_datapoints():
+    mcp, provider = _server()
+    provider.feedback.findings = [
+        {**UNCLEAR, "kind": "contextOffTopic", "message": "m", "datapointIndex": 9}
+    ]
+
+    result = _create_classification(
+        mcp,
+        datapoint_references=[REF_A] * 25,
+        contexts=[f"c{i}" for i in range(25)],
+    )
+
+    [review] = provider.feedback.requests
+    spread = (0, 3, 5, 8, 11, 13, 16, 19, 21, 24)
+    assert [d["context"] for d in review["datapoints"]] == [f"c{i}" for i in spread]
+    assert result["feedback"][0]["datapoint_index"] == 24
+
+
+def test_a_sign_in_without_the_feedback_scope_skips_the_review(caplog):
+    mcp, provider = _server()
+    provider.granted = set()
+
+    with caplog.at_level(logging.INFO, logger="rapidata_mcp.tools"):
+        result = _create_comparison(mcp)
+
+    assert provider.feedback.requests == []
+    assert result["created"] is True
+    assert result["feedback_check"] == "skipped"
+    assert "Task feedback check skipped" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("HTTP 503"), AttributeError("no job_task_feedback_post")],
+)
+def test_an_unavailable_review_does_not_block_the_draft(error):
+    mcp, provider = _server()
+    provider.feedback.error = error
+
+    result = _create_comparison(mcp)
+
+    assert len(provider.client.job.created) == 1
+    assert result["created"] is True
+    assert result["feedback_check"] == "unavailable"
+    assert result["feedback"] == []
+
+
+def test_a_slow_review_does_not_hold_the_draft_back(monkeypatch):
+    monkeypatch.setattr(tools, "_FEEDBACK_TIMEOUT_S", 0.2)
+    mcp, provider = _server()
+    provider.feedback.delay = 1.0
+
+    started = time.monotonic()
+    result = _create_comparison(mcp)
+
+    assert time.monotonic() - started < 0.9
+    assert result["created"] is True
+    assert result["feedback_check"] == "unavailable"
+
+
+def test_the_draft_schema_only_adds_optional_fields():
+    mcp, _ = _server()
+    listed = {t.name: t for t in asyncio.run(mcp.list_tools())}
+
+    for name in ("create_classification_task", "create_comparison_task"):
+        schema = listed[name].outputSchema
+        assert schema is not None
+        assert sorted(schema["required"]) == sorted(
+            [
+                "job_definition_id",
+                "name",
+                "status",
+                "details_url",
+                "runs_on",
+                "total_responses",
+                "estimated_cost_usd",
+                "budget_left_usd",
+                "confirmation_required",
+                "next_step",
+            ]
+        )
+        assert {"created", "feedback", "feedback_check"} <= set(schema["properties"])
+        assert schema.get("additionalProperties") is not False
+        assert "force" not in listed[name].inputSchema.get("required", [])
 
 
 def test_a_draft_shows_its_price_and_the_credit_left():
