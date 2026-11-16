@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import math
 import os
 import time
 from collections.abc import Callable, Sequence
@@ -98,6 +99,7 @@ _ADAPTIVE_MAX_RESPONSES = 100
 _ADAPTIVE_TYPICAL = (
     "about 21 per pair on average: 7 for a clear pair, around 31 for a close one"
 )
+_LEGACY_QUORUM_SHARE = 0.7
 
 TASK_FEEDBACK_SCOPE = "job:task-feedback"
 # The review takes at most 10 datapoints. Waiting on it blocks the event loop, and
@@ -184,6 +186,7 @@ class DraftResult(_DraftResultBase, total=False):
     created: bool | None
     feedback: list[TaskFeedback] | None
     feedback_check: FeedbackCheck | None
+    deprecation: str | None
 
 
 class AccountBalance(TypedDict):
@@ -302,6 +305,7 @@ def register_tools(
         stopping: int | AdaptiveStopping | QuorumStopping,
         check: FeedbackCheck,
         feedback: list[TaskFeedback],
+        deprecation: str | None,
     ) -> DraftResult:
         price = _pricing.submit(
             contextvars.copy_context().run, _estimated_cost, definition
@@ -344,6 +348,7 @@ def register_tools(
             "created": True,
             "feedback": feedback,
             "feedback_check": check,
+            "deprecation": deprecation,
         }
 
     def _open_upload_session() -> MediaUpload:
@@ -606,6 +611,16 @@ def register_tools(
                 )
             ),
         ] = None,
+        confidence_threshold: Annotated[
+            float | None,
+            Field(
+                description=(
+                    "Deprecated, use quorum. Still accepted from older tool lists, "
+                    "as a quorum of 70% of responses_per_datapoint."
+                ),
+                json_schema_extra={"deprecated": True},
+            ),
+        ] = None,
         keep_option_order: Annotated[
             bool,
             Field(
@@ -646,6 +661,16 @@ def register_tools(
 
         from rapidata import NoShuffleSetting, QuorumStopping
 
+        deprecation = None
+        if confidence_threshold is not None:
+            if quorum is None:
+                quorum = math.ceil(_LEGACY_QUORUM_SHARE * responses_per_datapoint)
+            deprecation = (
+                "confidence_threshold is deprecated: this task stops an item once "
+                f"{quorum} of {responses_per_datapoint} responses agree. Pass quorum "
+                "instead."
+            )
+            logger.info("Deprecated confidence_threshold applied as quorum %s", quorum)
         stopping: int | QuorumStopping = (
             QuorumStopping(threshold=quorum, max_responses=responses_per_datapoint)
             if quorum is not None
@@ -664,7 +689,7 @@ def register_tools(
             contexts=contexts,
         )
         if check == "flagged" and not force:
-            return _not_created(name, total_responses, feedback)
+            return _not_created(name, total_responses, feedback, deprecation)
 
         definition = client.job.create_classification_job_definition(
             name=name,
@@ -676,7 +701,7 @@ def register_tools(
             settings=[NoShuffleSetting()] if keep_option_order else None,
         )
         return _draft_result(
-            client, definition, total_responses, stopping, check, feedback
+            client, definition, total_responses, stopping, check, feedback, deprecation
         )
 
     @mcp.tool(
@@ -727,6 +752,17 @@ def register_tools(
                 )
             ),
         ] = None,
+        confidence_threshold: Annotated[
+            float | None,
+            Field(
+                description=(
+                    "Deprecated: pairs stop adaptively by default. Still accepted from "
+                    "older tool lists, as adaptive stopping capped at "
+                    "responses_per_datapoint when that is set."
+                ),
+                json_schema_extra={"deprecated": True},
+            ),
+        ] = None,
         force: Annotated[bool, Field(description=_FORCE_DESCRIPTION)] = False,
     ) -> DraftResult:
         """Create a pairwise comparison task: humans choose between two items each.
@@ -757,11 +793,24 @@ def register_tools(
 
         from rapidata import AdaptiveStopping
 
-        stopping: int | AdaptiveStopping = (
-            AdaptiveStopping()
-            if responses_per_datapoint is None
-            else responses_per_datapoint
-        )
+        deprecation = None
+        stopping: int | AdaptiveStopping
+        if confidence_threshold is not None:
+            stopping = AdaptiveStopping(max_responses=responses_per_datapoint)
+            cap = (
+                f", capped at {responses_per_datapoint} per pair"
+                if responses_per_datapoint is not None
+                else ""
+            )
+            deprecation = (
+                "confidence_threshold is deprecated: this task stops each pair "
+                f"adaptively{cap}. Stop sending it; pairs stop adaptively by default."
+            )
+            logger.info("Deprecated confidence_threshold applied as %s", stopping)
+        elif responses_per_datapoint is None:
+            stopping = AdaptiveStopping()
+        else:
+            stopping = responses_per_datapoint
         provider = provider_factory()
         client = provider.get_client()
         total_responses = len(pairs) * _max_responses(stopping)
@@ -775,7 +824,7 @@ def register_tools(
             contexts=contexts,
         )
         if check == "flagged" and not force:
-            return _not_created(name, total_responses, feedback)
+            return _not_created(name, total_responses, feedback, deprecation)
 
         definition = client.job.create_compare_job_definition(
             name=name,
@@ -785,7 +834,7 @@ def register_tools(
             contexts=contexts,
         )
         return _draft_result(
-            client, definition, total_responses, stopping, check, feedback
+            client, definition, total_responses, stopping, check, feedback, deprecation
         )
 
     @mcp.tool(
@@ -1217,6 +1266,14 @@ def _collection_text(
             text += f" Rapidata's estimate of {estimate} counts all {total_responses}."
         return text
     cap = _max_responses(stopping)
+    if stopping.max_responses is not None:
+        text = (
+            f"Starting it will collect up to {total_responses} human responses, as "
+            f"each pair stops once its result is clear or at {cap}, and spend money."
+        )
+        if estimate:
+            text += f" Rapidata's estimate of {estimate} counts all {total_responses}."
+        return text
     text = (
         "Starting it will collect responses until each pair's result is clear "
         f"({_ADAPTIVE_TYPICAL}, never more than {cap}) and spend money."
@@ -1236,7 +1293,10 @@ def _spread(count: int, size: int) -> list[int]:
 
 
 def _not_created(
-    name: str, total_responses: int, feedback: list[TaskFeedback]
+    name: str,
+    total_responses: int,
+    feedback: list[TaskFeedback],
+    deprecation: str | None,
 ) -> DraftResult:
     return {
         "job_definition_id": "",
@@ -1258,6 +1318,7 @@ def _not_created(
         "created": False,
         "feedback": feedback,
         "feedback_check": "flagged",
+        "deprecation": deprecation,
     }
 
 
