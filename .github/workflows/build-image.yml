@@ -150,10 +150,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      # setup-uv's python-version already created and activated .venv; `uv venv` fails on it.
       - name: Install the released SDK
-        run: |
-          uv venv
-          uv pip install . "rapidata==$SDK_VERSION"
+        run: uv pip install . "rapidata==$SDK_VERSION"
 
       - name: Compare with sdk_coverage.toml
         id: check
