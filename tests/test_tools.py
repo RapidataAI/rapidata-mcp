@@ -764,7 +764,6 @@ def test_a_comparison_collects_until_each_pair_is_clear_by_default():
         AdaptiveStopping()
     )
     assert result["total_responses"] == 200
-    assert result["deprecation"] is None
     assert "until each pair's result is clear" in result["next_step"]
     assert "never more than 100" in result["next_step"]
     assert "a fifth to a third of it" in result["next_step"]
@@ -799,57 +798,13 @@ def test_quorum_stops_a_classification_item_once_enough_agree():
 @pytest.mark.parametrize(
     "tool", ["create_classification_task", "create_comparison_task"]
 )
-def test_confidence_threshold_is_advertised_as_deprecated(tool):
+def test_the_create_tools_no_longer_take_a_confidence_threshold(tool):
     mcp, _ = _server()
     listed = {t.name: t for t in asyncio.run(mcp.list_tools())}
 
-    field = listed[tool].inputSchema["properties"]["confidence_threshold"]
-    assert field["deprecated"] is True
-    assert field["description"].startswith("Deprecated")
-
-
-@pytest.mark.parametrize(("quorum", "expected"), [(None, 7), (5, 5)])
-def test_an_old_confidence_threshold_becomes_a_quorum(quorum, expected):
-    from rapidata import QuorumStopping
-
-    mcp, provider = _server()
-
-    result = _create_classification(mcp, confidence_threshold=0.99, quorum=quorum)
-
-    assert provider.client.job.created[0]["responses_per_datapoint"] == (
-        QuorumStopping(threshold=expected, max_responses=10)
-    )
-    assert "confidence_threshold is deprecated" in result["deprecation"]
-    assert f"once {expected} of 10 responses agree" in result["deprecation"]
-
-
-@pytest.mark.parametrize(
-    ("responses", "stopping", "total"),
-    [(None, {}, 100), (10, {"max_responses": 10}, 10)],
-)
-def test_an_old_confidence_threshold_stops_pairs_adaptively(
-    responses, stopping, total
-):
-    from rapidata import AdaptiveStopping
-
-    mcp, provider = _server()
-    arguments = {"responses_per_datapoint": responses} if responses else {}
-
-    result = _call(
-        mcp,
-        "create_comparison_task",
-        name="n",
-        instruction="Which image looks more realistic?",
-        comparison_pairs=[[REF_A, REF_B]],
-        confidence_threshold=0.99,
-        **arguments,
-    )
-
-    assert provider.client.job.created[0]["responses_per_datapoint"] == (
-        AdaptiveStopping(**stopping)
-    )
-    assert result["total_responses"] == total
-    assert "stops each pair adaptively" in result["deprecation"]
+    assert "confidence_threshold" not in listed[tool].inputSchema["properties"]
+    with pytest.raises(ToolError, match=r"takes no confidence_threshold.*outdated"):
+        _call(mcp, tool, name="n", confidence_threshold=0.99)
 
 
 def test_account_balance_for_a_new_prepaid_account():
