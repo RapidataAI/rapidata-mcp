@@ -66,6 +66,9 @@ from rapidata_mcp.tools import TASK_FEEDBACK_SCOPE, register_tools
 logger = logging.getLogger(__name__)
 
 _METADATA_PATH = "/.well-known/oauth-protected-resource"
+# Proves domain ownership to OpenAI's plugin portal; public by design, and must stay
+# served for later ChatGPT plugin reviews.
+_OPENAI_APPS_CHALLENGE = "lyipPhM1qYtibkjt83SF6f-5Am3_fYLSH-ZGRpAorUw"
 _MCP_PATH = "/mcp"
 # "mcp" is the scope that carries https://mcp.rapidata.ai as an OAuth resource on
 # the auth server; clients must request it so the auth server accepts the RFC 8707
@@ -496,6 +499,9 @@ def build_app(settings: Settings | None = None) -> Starlette:
     async def landing(request: Request) -> HTMLResponse:
         return HTMLResponse(_OVERVIEW_HTML)
 
+    async def openai_apps_challenge(request: Request) -> PlainTextResponse:
+        return PlainTextResponse(_OPENAI_APPS_CHALLENGE)
+
     upload_html, upload_headers = _upload_page(settings.api_url)
 
     async def upload_page(request: Request) -> Response:
@@ -506,6 +512,11 @@ def build_app(settings: Settings | None = None) -> Starlette:
     routes = [
         Route("/", landing, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
+        Route(
+            "/.well-known/openai-apps-challenge",
+            openai_apps_challenge,
+            methods=["GET"],
+        ),
         # No auth layer: the page's uploads carry the session's upload token instead.
         Route("/upload/{session_id}", upload_page, methods=["GET"]),
         Route(_METADATA_PATH, protected_resource_metadata, methods=["GET"]),
