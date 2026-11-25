@@ -1712,7 +1712,7 @@ wheels = [
 
 [[package]]
 name = "rapidata"
-version = "3.31.3"
+version = "3.31.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "authlib" },
@@ -1735,9 +1735,9 @@ dependencies = [
     { name = "tinytag" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/02/76/3bb36774646185306b4bb93c2a3695191c383a34dfe953526ccb338071d1/rapidata-3.31.3.tar.gz", hash = "sha256:214d3a645f474ff043a99d4d54400348f1c870661883935968aaefe53f0f329f", size = 1094081, upload-time = "2026-11-16T13:31:36.739Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/10/f902d69bd2e1dacec3c8e57402f429c0e1c723e120ee95e7e94fd2caa249/rapidata-3.31.6.tar.gz", hash = "sha256:b392bf9626ebc796162d29a05b2c327a58f080d54ff37f987dd15daf70c30b65", size = 1088281, upload-time = "2026-11-20T16:41:23.537Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/7d/90648c0e96ed2464d3ac1517a17f5f7c3206fe393ddcaa96fcf67e26b29d/rapidata-3.31.3-py3-none-any.whl", hash = "sha256:dc42a4346fbffb13c86d3ed504f99b456cb16dd64635c322aba44c2166e71128", size = 3880744, upload-time = "2026-11-16T13:31:33.727Z" },
+    { url = "https://files.pythonhosted.org/packages/32/de/5cb47190000211ce337797a4abad063946e884d899f8e8860e32dfe99bf1/rapidata-3.31.6-py3-none-any.whl", hash = "sha256:838e193bfebeeb490e8e7de6059f741f955e0b009f8dabe49861be879588c6d7", size = 3902715, upload-time = "2026-11-20T16:41:21.496Z" },
 ]
 
 [[package]]
@@ -1775,7 +1775,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.27.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8.0" },
-    { name = "rapidata", specifier = "==3.31.3" },
+    { name = "rapidata", specifier = "==3.31.6" },
     { name = "starlette", specifier = ">=0.40.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "typing-extensions", specifier = ">=4.12" },

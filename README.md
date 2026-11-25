@@ -243,7 +243,7 @@ instructions, such as Claude Code, also get it on the last line of those instruc
 | `POST/GET/DELETE /mcp` | Bearer JWT | The MCP Streamable-HTTP endpoint. |
 | `GET /.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata. |
 | `GET /upload/{id}` | none (the page's uploads carry the link's upload token) | Static page that uploads dropped files to an `upload_media` link. |
-| `GET /health` | none | Liveness/readiness probe → `{"status":"ok","version":"2026.11.12.1640-0a5dfdf · rapidata 3.31.3"}`. |
+| `GET /health` | none | Liveness/readiness probe → `{"status":"ok","version":"2026.11.12.1640-0a5dfdf · rapidata 3.31.6"}`. |
 
 The upload sessions themselves live on the Rapidata API, not here: `POST /asset/upload-session`
 and `GET /asset/upload-session/{id}/files` (called by the tools with the exchanged API token), and
@@ -291,7 +291,7 @@ picks up the new tag and writes it into the `infrastructure` overlays, which Arg
 
 `--build-arg RAPIDATA_MCP_IMAGE_TAG=2026.11.12.1640-0a5dfdf` names the build; CI passes
 the version. The server reports it with the installed SDK version, e.g.
-`2026.11.12.1640-0a5dfdf · rapidata 3.31.3`, in three places: `GET /health`,
+`2026.11.12.1640-0a5dfdf · rapidata 3.31.6`, in three places: `GET /health`,
 `serverInfo.version` in the `initialize` response, and the last line of the server
 instructions. Without the build arg it reports `dev`. To see what is deployed:
 

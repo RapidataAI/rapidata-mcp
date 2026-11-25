@@ -316,7 +316,7 @@ def _image_tag() -> str:
 
 def server_version() -> str:
     """The image tag this server was built as (``dev`` outside the image) and the
-    rapidata SDK it runs, e.g. ``2026.11.12.1640-0a5dfdf · rapidata 3.31.3``."""
+    rapidata SDK it runs, e.g. ``2026.11.12.1640-0a5dfdf · rapidata 3.31.6``."""
     return f"{_image_tag()} · rapidata {metadata.version('rapidata')}"
 
 
