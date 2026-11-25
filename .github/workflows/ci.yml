@@ -17,13 +17,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --locked --group dev
 
       - name: Lint (ruff)
         run: uv run ruff check src tests
 
       - name: Test (pytest)
         run: uv run pytest
+
+      - name: List unclassified SDK functions
+        if: failure()
+        run: uv run python -m rapidata_mcp.coverage sdk_coverage.toml >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Type-check (pyright)
         run: uv run pyright
@@ -33,3 +37,9 @@ jobs:
 
       - name: Import smoke test
         run: uv run python -c "import rapidata_mcp; rapidata_mcp.build_app(rapidata_mcp.Settings(auth_disabled=True))"
+
+      - name: Smoke-test the image
+        run: |
+          docker build -t rapidata-mcp:ci .
+          docker run --rm --entrypoint python rapidata-mcp:ci \
+            -c 'import rapidata_mcp; rapidata_mcp.build_app(rapidata_mcp.Settings(auth_disabled=True))'

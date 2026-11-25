@@ -3,20 +3,23 @@ FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
     PORT=8000 \
     HOST=0.0.0.0
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching.
-COPY pyproject.toml README.md ./
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH="/app/.venv/bin:$PATH"
+
+# --locked installs exactly uv.lock and fails if it is stale, so a commit always builds
+# the same dependency set.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --locked --no-dev --no-install-project
 COPY src ./src
-# A rebuild triggered by a rapidata SDK release passes the just-published version
-# here. It both pins that exact version and busts this layer's cache, which would
-# otherwise reuse the SDK an earlier build resolved from the same source tree.
-ARG RAPIDATA_VERSION=""
-RUN pip install --no-cache-dir . ${RAPIDATA_VERSION:+rapidata==${RAPIDATA_VERSION}}
+RUN uv sync --locked --no-dev --no-editable
 
 # Run as a non-root user.
 RUN useradd --create-home --uid 10001 app

@@ -243,7 +243,7 @@ instructions, such as Claude Code, also get it on the last line of those instruc
 | `POST/GET/DELETE /mcp` | Bearer JWT | The MCP Streamable-HTTP endpoint. |
 | `GET /.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata. |
 | `GET /upload/{id}` | none (the page's uploads carry the link's upload token) | Static page that uploads dropped files to an `upload_media` link. |
-| `GET /health` | none | Liveness/readiness probe → `{"status":"ok","version":"sha-5f696e2 · rapidata 3.29.0"}`. |
+| `GET /health` | none | Liveness/readiness probe → `{"status":"ok","version":"2026.11.12.1640-0a5dfdf · rapidata 3.31.6"}`. |
 
 The upload sessions themselves live on the Rapidata API, not here: `POST /asset/upload-session`
 and `GET /asset/upload-session/{id}/files` (called by the tools with the exchanged API token), and
@@ -279,16 +279,22 @@ docker run -p 8000:8000 \
   rapidata-mcp
 ```
 
-The build resolves the `rapidata` SDK from PyPI, so the version baked into an image is
-whichever was current when it was built. `--build-arg RAPIDATA_VERSION=3.19.2` pins an
-exact one instead; the SDK's release workflow passes it to rebuild this image on every
-stable SDK release, so the deployed server keeps tracking the SDK it wraps.
+The image installs exactly `uv.lock`, and `pyproject.toml` pins the `rapidata` SDK exactly,
+so one commit always builds the same image. Renovate opens a PR for each SDK release and
+automerges minor and patch bumps once CI is green: the tests (including the SDK coverage
+check) and the image smoke test. A bump that adds or drops an SDK function fails the
+coverage test, lists the functions in the run summary, and waits for a human.
 
-`--build-arg RAPIDATA_MCP_IMAGE_TAG=sha-5f696e2` names the build; CI passes the tag it
-pushes. The server reports it with the installed SDK version, e.g.
-`sha-5f696e2 · rapidata 3.29.0`, in three places: `GET /health`, `serverInfo.version` in
-the `initialize` response, and the last line of the server instructions. Without the build
-arg it reports `dev`. To see what is deployed:
+Every push to `main` is a version: `build-image.yml` tags the commit
+`YYYY.MM.DD.HHMM-<sha7>` (UTC), builds and smoke-tests the image under that same tag,
+and pushes it. Deploys go through Poseidon's Releases: the `rapidata-mcp` ReleaseTarget
+picks up the new tag and writes it into the `infrastructure` overlays, which ArgoCD syncs.
+
+`--build-arg RAPIDATA_MCP_IMAGE_TAG=2026.11.12.1640-0a5dfdf` names the build; CI passes
+the version. The server reports it with the installed SDK version, e.g.
+`2026.11.12.1640-0a5dfdf · rapidata 3.31.6`, in three places: `GET /health`,
+`serverInfo.version` in the `initialize` response, and the last line of the server
+instructions. Without the build arg it reports `dev`. To see what is deployed:
 
 ```bash
 curl https://mcp.rapidata.ai/health
@@ -321,8 +327,8 @@ comparison only, existing audiences narrowed by country or language only, no val
 leaderboards. Those are later stages, and
 the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
 above). `sdk_coverage.toml` lists every public SDK function as exposed by a tool or left out
-with the reason; a test fails when it misses one, and each SDK release that adds or drops one
-opens an issue. Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
+with the reason; a test fails when it misses one, so an SDK bump that adds or drops one
+waits for a human. Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
 `start_job` assigns it to the chosen audience.
 
 ## License
