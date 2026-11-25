@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     # mcp 2.x drops `mcp.server.fastmcp`, which server.py is built on.
     "mcp>=1.28.0,<2",
-    # Exact so one commit always builds one image; pin-sdk.yml bumps it per SDK release.
+    # Exact so one commit always builds one image; Renovate bumps it.
     "rapidata==3.31.6",
     "PyJWT[crypto]>=2.8.0",
     "httpx>=0.28.0",

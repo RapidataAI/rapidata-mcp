@@ -280,9 +280,10 @@ docker run -p 8000:8000 \
 ```
 
 The image installs exactly `uv.lock`, and `pyproject.toml` pins the `rapidata` SDK exactly,
-so one commit always builds the same image. Each stable SDK release fires `pin-sdk.yml`,
-which opens a PR bumping the pin and the lock, runs the tests and the image smoke test,
-and merges it; if they fail, the PR stays open for a human and prod keeps the old SDK.
+so one commit always builds the same image. Renovate opens a PR for each SDK release and
+automerges minor and patch bumps once CI is green: the tests (including the SDK coverage
+check) and the image smoke test. A bump that adds or drops an SDK function fails the
+coverage test, lists the functions in the run summary, and waits for a human.
 
 Every push to `main` is a version: `build-image.yml` tags the commit
 `YYYY.MM.DD.HHMM-<sha7>` (UTC), builds and smoke-tests the image under that same tag,
@@ -326,8 +327,8 @@ comparison only, existing audiences narrowed by country or language only, no val
 leaderboards. Those are later stages, and
 the full [Rapidata SDK](https://docs.rapidata.ai/) covers them today (see "Beyond these tools"
 above). `sdk_coverage.toml` lists every public SDK function as exposed by a tool or left out
-with the reason; a test fails when it misses one, and each SDK release that adds or drops one
-opens an issue. Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
+with the reason; a test fails when it misses one, so an SDK bump that adds or drops one
+waits for a human. Built on the SDK's `job` + `audience` API: each create tool makes a job definition, and
 `start_job` assigns it to the chosen audience.
 
 ## License
