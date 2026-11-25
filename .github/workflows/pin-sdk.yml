@@ -1,7 +1,7 @@
 name: Pin released SDK
 
 # The SDK's release workflow fires sdk-released on every stable rapidata release. The pin
-# lands on main as a merged PR, so build-image.yml versions and deploys it like any commit.
+# lands on main as a merged PR, so it is versioned and released like any other commit.
 on:
   repository_dispatch:
     types: [sdk-released]

@@ -1,13 +1,11 @@
 name: Build and push image
 
+# Deploys are Poseidon's: the rapidata-mcp ReleaseTarget picks up each new version tag and
+# waits for its image, so this workflow only versions and publishes.
+
 on:
   push:
     branches: [main]
-
-# The infrastructure dispatch is last-write-wins, so deploys finish in push order.
-concurrency:
-  group: push-main-deploy
-  cancel-in-progress: false
 
 env:
   REGION: europe-west4
@@ -109,36 +107,3 @@ jobs:
 
       - name: Push
         run: docker push "${{ env.GAR_LOCATION }}/rapidataai/rapidata-mcp:${{ env.VERSION }}"
-
-      # ArgoCD auto-syncs services/rapidata-mcp once infrastructure's update-images.yml
-      # commits the new tag into the overlay.
-      - name: Create infrastructure app token
-        uses: actions/create-github-app-token@v3
-        id: infra-token
-        with:
-          app-id: ${{ vars.ARGOCD_APP_ID }}
-          private-key: ${{ secrets.ARGOCD_APP_PRIVATE_KEY }}
-          owner: RapidataAI
-          repositories: infrastructure
-
-      - name: Deploy — bump test image tag
-        uses: octokit/request-action@v3.0.0
-        with:
-          route: POST /repos/{owner}/{repo}/dispatches
-          owner: RapidataAI
-          repo: infrastructure
-          event_type: update-image-tags
-          client_payload: '{"tag": "${{ env.VERSION }}", "type": "rapidata-mcp", "overlay": "test"}'
-        env:
-          GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}
-
-      - name: Deploy — bump prod image tag
-        uses: octokit/request-action@v3.0.0
-        with:
-          route: POST /repos/{owner}/{repo}/dispatches
-          owner: RapidataAI
-          repo: infrastructure
-          event_type: update-image-tags
-          client_payload: '{"tag": "${{ env.VERSION }}", "type": "rapidata-mcp", "overlay": "prod"}'
-        env:
-          GITHUB_TOKEN: ${{ steps.infra-token.outputs.token }}

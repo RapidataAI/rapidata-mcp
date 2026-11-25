@@ -286,7 +286,8 @@ and merges it; if they fail, the PR stays open for a human and prod keeps the ol
 
 Every push to `main` is a version: `build-image.yml` tags the commit
 `YYYY.MM.DD.HHMM-<sha7>` (UTC), builds and smoke-tests the image under that same tag,
-pushes it, then bumps the test and prod overlays in `infrastructure`, which ArgoCD syncs.
+and pushes it. Deploys go through Poseidon's Releases: the `rapidata-mcp` ReleaseTarget
+picks up the new tag and writes it into the `infrastructure` overlays, which ArgoCD syncs.
 
 `--build-arg RAPIDATA_MCP_IMAGE_TAG=2026.11.12.1640-0a5dfdf` names the build; CI passes
 the version. The server reports it with the installed SDK version, e.g.
